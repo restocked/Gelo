@@ -46,7 +46,7 @@ final class ControlItem {
     private let constraint: NSLayoutConstraint?
 
     /// The control item's identifier.
-    private let identifier: Identifier
+    let identifier: Identifier
 
     /// Storage for internal observers.
     private var cancellables = Set<AnyCancellable>()

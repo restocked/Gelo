@@ -158,6 +158,58 @@ struct MenuBarItem {
         }
         self.init(itemWindow: window)
     }
+
+    /// Creates a menu bar item using auxiliary identity sources.
+    ///
+    /// On macOS 26 (Tahoe), the window list APIs no longer expose per-item
+    /// bundle identifier or window title, so the standard initializer assigns
+    /// every item the same opaque identity. This initializer accepts two
+    /// auxiliary maps that supply identity from sources that still work on
+    /// Tahoe:
+    ///
+    /// - `controlItemMap` maps a window identifier to one of Gelo's own
+    ///   control item identifiers, recovered by frame matching against the
+    ///   underlying `NSStatusItem` windows.
+    /// - `axMap` maps a frame in CG screen coordinates to the identity
+    ///   recovered for that frame via the Accessibility API.
+    ///
+    /// Lookups proceed in priority order: control item map first, then AX map,
+    /// then the window-list-derived identity. Passing empty maps reproduces
+    /// the original behavior, so this initializer is safe to use on any
+    /// macOS version.
+    init?(
+        windowID: CGWindowID,
+        controlItemMap: [CGWindowID: ControlItem.Identifier],
+        axMap: [AXFrameKey: AXMenuBarItemIdentity]
+    ) {
+        guard let itemWindow = WindowInfo(windowID: windowID) else {
+            return nil
+        }
+        guard itemWindow.isMenuBarItem else {
+            return nil
+        }
+        self.window = itemWindow
+
+        if let controlIdentifier = controlItemMap[windowID] {
+            self.info = MenuBarItemInfo(
+                namespace: .ice,
+                title: controlIdentifier.rawValue
+            )
+            return
+        }
+
+        if !axMap.isEmpty,
+           let frame = Bridging.getWindowFrame(for: windowID),
+           let axIdentity = axMap[AXFrameKey(frame)] {
+            self.info = MenuBarItemInfo(
+                namespace: MenuBarItemInfo.Namespace(axIdentity.bundleIdentifier),
+                title: axIdentity.title ?? ""
+            )
+            return
+        }
+
+        self.info = MenuBarItemInfo(uncheckedItemWindow: itemWindow)
+    }
 }
 
 // MARK: MenuBarItem Getters
@@ -171,7 +223,13 @@ extension MenuBarItem {
     ///     are on screen should be returned.
     ///   - activeSpaceOnly: A Boolean value that indicates whether only the menu bar items
     ///     that are on the active space should be returned.
-    static func getMenuBarItems(on display: CGDirectDisplayID? = nil, onScreenOnly: Bool, activeSpaceOnly: Bool) -> [MenuBarItem] {
+    static func getMenuBarItems(
+        on display: CGDirectDisplayID? = nil,
+        onScreenOnly: Bool,
+        activeSpaceOnly: Bool,
+        controlItemMap: [CGWindowID: ControlItem.Identifier] = [:],
+        axMap: [AXFrameKey: AXMenuBarItemIdentity] = [:]
+    ) -> [MenuBarItem] {
         var option: Bridging.WindowListOption = [.menuBarItems]
 
         var titlePredicate: (MenuBarItem) -> Bool = { _ in true }
@@ -197,7 +255,7 @@ extension MenuBarItem {
         return Bridging.getWindowList(option: option).lazy
             .filter(boundsPredicate)
             .compactMap { windowID in
-                MenuBarItem(windowID: windowID)
+                MenuBarItem(windowID: windowID, controlItemMap: controlItemMap, axMap: axMap)
             }
             .filter(titlePredicate)
             .sortedByOrderInMenuBar()

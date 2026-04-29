@@ -333,7 +333,19 @@ extension MenuBarItemManager {
             cachedItemWindowIDs = itemWindowIDs
         }
 
-        var items = MenuBarItem.getMenuBarItems(onScreenOnly: false, activeSpaceOnly: true)
+        // Build auxiliary identity maps so items can be identified on macOS
+        // versions where the window list APIs no longer expose bundle
+        // identifier or window title (e.g. macOS 26 / Tahoe).
+        let sections = appState?.menuBarManager.sections ?? []
+        let controlItemMap = ControlItemDiscovery.buildMap(for: sections)
+        let axMap = AXMenuBarDiscovery.buildIdentityMap()
+
+        var items = MenuBarItem.getMenuBarItems(
+            onScreenOnly: false,
+            activeSpaceOnly: true,
+            controlItemMap: controlItemMap,
+            axMap: axMap
+        )
 
         let hiddenControlItem = items.firstIndex(matching: .hiddenControlItem).map { items.remove(at: $0) }
         let alwaysHiddenControlItem = items.firstIndex(matching: .alwaysHiddenControlItem).map { items.remove(at: $0) }
