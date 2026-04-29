@@ -3,34 +3,25 @@
 //  Ice
 //
 
+import AXSwift
 import Cocoa
 
 /// Discovers the `CGWindowID` corresponding to each of Gelo's own control items.
 ///
-/// On macOS 26 (Tahoe), the window list reports all menu bar items as owned by
-/// Control Center with `nil` titles, so the previous identification path
-/// (filtering by bundle identifier and title) cannot recognize Gelo's own
-/// control items. Frame matching against the underlying `NSStatusItem` windows
-/// remains reliable across macOS versions, so this type provides a fallback
-/// path that does not rely on window list metadata.
+/// On macOS 26 (Tahoe), menu bar item windows are reported as owned by Control
+/// Center and no longer carry useful per-item titles. Gelo's own status item
+/// buttons are stamped with accessibility identifiers, so we recover their
+/// rendered frames from this app's AX extras menu bar and match those frames to
+/// the CG menu bar window list.
 enum ControlItemDiscovery {
-    /// Tolerance used when matching the x-origin of a frame.
-    ///
-    /// Tahoe occasionally rounds layout coordinates by a fraction of a point
-    /// between the AppKit and CG coordinate spaces.
-    private static let xTolerance: CGFloat = 1.0
+    /// Tolerance for matching AX frames to CG window frames.
+    private static let frameTolerance: CGFloat = 2
 
-    /// Tolerance used when matching the width of a frame.
-    private static let widthTolerance: CGFloat = 2.0
+    /// Minimum width used to recognize Ice's hidden-section spacer windows.
+    private static let spacerWidthThreshold = NSStatusBar.system.thickness * 20
 
     /// Builds a mapping from `CGWindowID` to the corresponding control item
-    /// identifier for each control item that is currently placed in the menu
-    /// bar.
-    ///
-    /// May be empty if no control items have been placed yet (e.g. very early
-    /// during launch). Callers should treat an empty map as "no information"
-    /// rather than "no control items present" and fall back to existing
-    /// metadata-based identification.
+    /// identifier for each control item present in the menu bar.
     @MainActor
     static func buildMap(for sections: [MenuBarSection]) -> [CGWindowID: ControlItem.Identifier] {
         let menuBarWindowIDs = Bridging.getWindowList(option: [.menuBarItems])
@@ -42,58 +33,159 @@ enum ControlItemDiscovery {
 
         for section in sections {
             let controlItem = section.controlItem
+            guard controlItem.isAddedToMenuBar else {
+                continue
+            }
+
+            if
+                let directID = controlItem.windowID,
+                menuBarWindowIDs.contains(directID),
+                Bridging.getWindowFrame(for: directID) != nil
+            {
+                map[directID] = controlItem.identifier
+            }
+        }
+
+        guard map.count < sections.filter({ $0.controlItem.isAddedToMenuBar }).count else {
+            return map
+        }
+
+        let windowFrames = menuBarWindowIDs.compactMap { windowID -> (CGWindowID, CGRect)? in
+            guard map[windowID] == nil, let frame = Bridging.getWindowFrame(for: windowID) else {
+                return nil
+            }
+            return (windowID, frame)
+        }
+
+        let axItems = controlItemAXItems()
+
+        for axItem in axItems {
             guard
-                controlItem.isAddedToMenuBar,
-                let nsWindow = controlItem.window
+                let rawIdentifier = axItem.identifier,
+                let identifier = ControlItem.Identifier(rawValue: rawIdentifier),
+                map.values.contains(identifier) == false,
+                let windowID = bestMatchingWindowID(for: axItem.frame, in: windowFrames)
             else {
                 continue
             }
+            map[windowID] = identifier
+        }
 
-            // Cheap path: on macOS prior to Tahoe, NSWindow.windowNumber
-            // matches the CGWindowID directly. Verify by confirming the
-            // ID is in the menu bar window list and has a usable frame.
-            let directID = CGWindowID(nsWindow.windowNumber)
-            if menuBarWindowIDs.contains(directID),
-               Bridging.getWindowFrame(for: directID) != nil {
-                map[directID] = controlItem.identifier
+        guard map.count < sections.filter({ $0.controlItem.isAddedToMenuBar }).count else {
+            return map
+        }
+
+        for (identifier, frame) in fallbackControlItemFrames(from: axItems, sections: sections) {
+            guard
+                map.values.contains(identifier) == false,
+                let windowID = bestMatchingWindowID(for: frame, in: windowFrames)
+            else {
                 continue
             }
+            map[windowID] = identifier
+        }
 
-            // Fallback path: match by frame. AppKit window frame is in
-            // Cocoa screen coordinates (bottom-left origin); the window list
-            // returns CG screen coordinates (top-left origin).
-            let cgFrame = convertToCGScreenFrame(nsWindow.frame)
-            let xTarget = cgFrame.minX
-            let widthTarget = cgFrame.width
+        guard map.count < sections.filter({ $0.controlItem.isAddedToMenuBar }).count else {
+            return map
+        }
 
-            for windowID in menuBarWindowIDs {
-                guard let candidateFrame = Bridging.getWindowFrame(for: windowID) else {
-                    continue
-                }
-                if abs(candidateFrame.minX - xTarget) <= xTolerance,
-                   abs(candidateFrame.width - widthTarget) <= widthTolerance {
-                    map[windowID] = controlItem.identifier
-                    break
-                }
+        for (identifier, windowID) in fallbackSpacerWindows(from: windowFrames, sections: sections) {
+            guard map.values.contains(identifier) == false else {
+                continue
             }
+            map[windowID] = identifier
         }
 
         return map
     }
 
-    /// Converts a Cocoa-screen-coordinate frame (bottom-left origin, primary
-    /// display height as reference) into the equivalent CG screen coordinate
-    /// frame (top-left origin) used by the window list APIs.
-    private static func convertToCGScreenFrame(_ nsFrame: CGRect) -> CGRect {
-        guard let primary = NSScreen.screens.first else {
-            return nsFrame
+    private static func controlItemAXItems() -> [(identifier: String?, frame: CGRect)] {
+        guard
+            let application = Application(NSRunningApplication.current),
+            let extrasMenuBar: UIElement = try? application.attribute(.extrasMenuBar),
+            let children: [UIElement] = try? extrasMenuBar.arrayAttribute(.children)
+        else {
+            return []
         }
-        let primaryHeight = primary.frame.height
-        return CGRect(
-            x: nsFrame.minX,
-            y: primaryHeight - nsFrame.maxY,
-            width: nsFrame.width,
-            height: nsFrame.height
-        )
+
+        return children.compactMap { child in
+            guard
+                let frame: CGRect = try? child.attribute(.frame)
+            else {
+                return nil
+            }
+            let identifier: String? = try? child.attribute(.identifier)
+            return (identifier, frame)
+        }
+    }
+
+    @MainActor
+    private static func fallbackControlItemFrames(
+        from axItems: [(identifier: String?, frame: CGRect)],
+        sections: [MenuBarSection]
+    ) -> [(ControlItem.Identifier, CGRect)] {
+        let placedIdentifiers = sections
+            .filter { $0.controlItem.isAddedToMenuBar }
+            .map(\.controlItem.identifier)
+        let visualOrder: [ControlItem.Identifier] = [.alwaysHidden, .hidden, .iceIcon]
+        let expectedVisualOrder = visualOrder.filter { placedIdentifiers.contains($0) }
+
+        let sortedItems = axItems.sorted { $0.frame.minX < $1.frame.minX }
+        guard sortedItems.count == expectedVisualOrder.count else {
+            return []
+        }
+
+        return zip(expectedVisualOrder, sortedItems.map(\.frame)).map { ($0, $1) }
+    }
+
+    @MainActor
+    private static func fallbackSpacerWindows(
+        from windowFrames: [(id: CGWindowID, frame: CGRect)],
+        sections: [MenuBarSection]
+    ) -> [(ControlItem.Identifier, CGWindowID)] {
+        let placedIdentifiers = sections
+            .filter { $0.controlItem.isAddedToMenuBar }
+            .map(\.controlItem.identifier)
+        let expectedSpacerOrder: [ControlItem.Identifier] = [.alwaysHidden, .hidden]
+            .filter { placedIdentifiers.contains($0) }
+        guard !expectedSpacerOrder.isEmpty else {
+            return []
+        }
+
+        let spacerWindows = windowFrames
+            .filter { $0.frame.width >= spacerWidthThreshold }
+            .sorted { $0.frame.minX < $1.frame.minX }
+            .suffix(expectedSpacerOrder.count)
+        guard spacerWindows.count == expectedSpacerOrder.count else {
+            return []
+        }
+
+        return zip(expectedSpacerOrder, spacerWindows.map(\.id)).map { ($0, $1) }
+    }
+
+    private static func bestMatchingWindowID(
+        for axFrame: CGRect,
+        in windowFrames: [(id: CGWindowID, frame: CGRect)]
+    ) -> CGWindowID? {
+        windowFrames
+            .filter { framesMatch($0.frame, axFrame) }
+            .min { $0.frame.centerDistance(to: axFrame) < $1.frame.centerDistance(to: axFrame) }?
+            .id
+    }
+
+    private static func framesMatch(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        lhs.centerDistance(to: rhs) <= frameTolerance &&
+        abs(lhs.width - rhs.width) <= frameTolerance &&
+        abs(lhs.height - rhs.height) <= frameTolerance
+    }
+}
+
+private extension CGRect {
+    var center: CGPoint {
+        CGPoint(x: midX, y: midY)
+    }
+
+    func centerDistance(to other: CGRect) -> CGFloat {
+        hypot(center.x - other.center.x, center.y - other.center.y)
     }
 }

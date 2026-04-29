@@ -67,7 +67,7 @@ final class IceBarPanel: NSPanel {
                         // Only continue if the menu bar is automatically hidden, as Ice
                         // can't currently display its menu bar items.
                         appState.menuBarManager.isMenuBarHiddenBySystemUserDefaults,
-                        let info = window.flatMap({ WindowInfo(windowID: CGWindowID($0.windowNumber)) }),
+                        let info = window.flatMap({ CGWindowID(exactly: $0.windowNumber) }).flatMap(WindowInfo.init(windowID:)),
                         // Window being offscreen means the menu bar is currently hidden.
                         // Close the bar, as things will start to look weird if we don't.
                         !info.isOnScreen
@@ -100,6 +100,47 @@ final class IceBarPanel: NSPanel {
     private func updateOrigin(for screen: NSScreen) {
         guard let appState else {
             return
+        }
+
+        func frameIsOnTargetScreen(_ frame: CGRect) -> Bool {
+            let center = CGPoint(x: frame.midX, y: frame.midY)
+            return screen.frame.intersects(frame) || screen.frame.contains(center)
+        }
+
+        func iceIconFrame() -> CGRect? {
+            let sections = appState.menuBarManager.sections
+            let controlItemMap = ControlItemDiscovery.buildMap(for: sections)
+
+            if
+                let windowID = controlItemMap.first(where: { $0.value == .iceIcon })?.key,
+                let frame = Bridging.getWindowFrame(for: windowID),
+                frameIsOnTargetScreen(frame)
+            {
+                Logger.iceBar.debug("Using discovered Ice icon frame for Ice Bar origin")
+                return frame
+            }
+
+            if
+                let item = appState.itemManager.itemCache.managedItems.first(where: { $0.info == .iceIcon }),
+                let frame = Bridging.getWindowFrame(for: item.windowID),
+                frameIsOnTargetScreen(frame)
+            {
+                Logger.iceBar.debug("Using cached Ice icon frame for Ice Bar origin")
+                return frame
+            }
+
+            if
+                let section = appState.menuBarManager.section(withName: .visible),
+                let windowID = section.controlItem.windowID,
+                let frame = Bridging.getWindowFrame(for: windowID),
+                frameIsOnTargetScreen(frame)
+            {
+                Logger.iceBar.debug("Using direct Ice icon frame for Ice Bar origin")
+                return frame
+            }
+
+            Logger.iceBar.debug("No Ice icon frame available for Ice Bar origin")
+            return nil
         }
 
         func getOrigin(for iceBarLocation: IceBarLocation) -> CGPoint {
@@ -135,11 +176,7 @@ final class IceBarPanel: NSPanel {
 
                 guard
                     lowerBound <= upperBound,
-                    let section = appState.menuBarManager.section(withName: .visible),
-                    let windowID = section.controlItem.windowID,
-                    // Bridging.getWindowFrame is more reliable than ControlItem.windowFrame,
-                    // i.e. if the control item is offscreen.
-                    let itemFrame = Bridging.getWindowFrame(for: windowID)
+                    let itemFrame = iceIconFrame()
                 else {
                     return originForRightOfScreen
                 }
@@ -384,7 +421,7 @@ private struct IceBarItemView: View {
 
     private var image: NSImage? {
         guard
-            let image = imageCache.images[item.info],
+            let image = imageCache.windowImages[item.windowID] ?? (item.hasGenericIdentity ? nil : imageCache.images[item.info]),
             let screen = imageCache.screen
         else {
             return nil
@@ -474,8 +511,8 @@ private struct IceBarItemClickView: NSViewRepresentable {
                 return
             }
             rightClickAction()
-        }
     }
+}
 
     let item: MenuBarItem
 
@@ -487,4 +524,9 @@ private struct IceBarItemClickView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSView, context: Context) { }
+}
+
+// MARK: - Logger
+private extension Logger {
+    static let iceBar = Logger(category: "IceBar")
 }

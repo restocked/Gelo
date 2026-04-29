@@ -75,15 +75,16 @@ struct MenuBarLayoutSettingsPane: View {
     private func layoutBar(for section: MenuBarSection.Name) -> some View {
         if
             let section = appState.menuBarManager.section(withName: section),
-            section.isEnabled
+            section.isEnabled || section.name == .alwaysHidden
         {
             VStack(alignment: .leading, spacing: 4) {
                 Text("\(section.name.displayString) Section")
                     .font(.system(size: 14))
                     .padding(.leading, 2)
 
-                LayoutBar(section: section)
+                LayoutBar(section: section, allowsDragging: section.isEnabled)
                     .environmentObject(appState.imageCache)
+                    .opacity(section.isEnabled ? 1 : 0.55)
             }
         }
     }

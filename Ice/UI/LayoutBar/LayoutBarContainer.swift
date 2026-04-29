@@ -94,7 +94,9 @@ final class LayoutBarContainer: NSView {
                     guard let self else {
                         return
                     }
-                    setArrangedViews(items: cache.managedItems(for: section.name))
+                    DispatchQueue.main.async {
+                        self.setArrangedViews(items: cache.managedItems(for: self.section.name))
+                    }
                 }
                 .store(in: &c)
 
@@ -104,7 +106,9 @@ final class LayoutBarContainer: NSView {
                     guard let self else {
                         return
                     }
-                    layoutArrangedViews()
+                    DispatchQueue.main.async {
+                        self.layoutArrangedViews()
+                    }
                 }
                 .store(in: &c)
         }
@@ -266,6 +270,16 @@ final class LayoutBarContainer: NSView {
                 }
             }
             if let sourceIndex = arrangedViews.firstIndex(of: sourceView) {
+                if destinationIndex > sourceIndex {
+                    guard draggingLocation.x > destinationView.frame.midX else {
+                        return .move
+                    }
+                } else if destinationIndex < sourceIndex {
+                    guard draggingLocation.x < destinationView.frame.midX else {
+                        return .move
+                    }
+                }
+
                 // source view is already inside this container, so move
                 // it from its old index to the new one
                 var targetIndex = destinationIndex

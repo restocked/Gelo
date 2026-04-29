@@ -24,14 +24,25 @@ final class LayoutBarScrollView: NSScrollView {
         set { paddingView.arrangedViews = newValue }
     }
 
+    /// Whether this layout bar accepts layout drag operations.
+    var allowsDragging: Bool {
+        get { paddingView.allowsDragging }
+        set { paddingView.allowsDragging = newValue }
+    }
+
     /// Creates a layout bar scroll view with the given app state, section, and spacing.
     ///
     /// - Parameters:
     ///   - appState: The shared app state instance.
     ///   - section: The section whose items are represented.
     ///   - spacing: The amount of space between each arranged view.
-    init(appState: AppState, section: MenuBarSection, spacing: CGFloat) {
-        self.paddingView = LayoutBarPaddingView(appState: appState, section: section, spacing: spacing)
+    init(appState: AppState, section: MenuBarSection, spacing: CGFloat, allowsDragging: Bool) {
+        self.paddingView = LayoutBarPaddingView(
+            appState: appState,
+            section: section,
+            spacing: spacing,
+            allowsDragging: allowsDragging
+        )
 
         super.init(frame: .zero)
 

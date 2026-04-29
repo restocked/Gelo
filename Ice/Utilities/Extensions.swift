@@ -319,6 +319,28 @@ extension Collection where Element == MenuBarItem {
     func firstIndex(matching info: MenuBarItemInfo) -> Index? {
         firstIndex { $0.info == info }
     }
+
+    /// Returns the first index where the menu bar item matching the specified
+    /// runtime item appears in the collection.
+    func firstIndex(matching item: MenuBarItem) -> Index? {
+        if let index = firstIndex(where: { $0.windowID == item.windowID }) {
+            return index
+        }
+        guard !item.hasGenericIdentity else {
+            return nil
+        }
+        return firstIndex { !$0.hasGenericIdentity && $0.info == item.info }
+    }
+}
+
+// MARK: - Array where Element == MenuBarItem
+
+extension Array where Element == MenuBarItem {
+    /// Returns a copy of this array with duplicate window IDs removed.
+    func uniquedByWindowID() -> Self {
+        var seenWindowIDs = Set<CGWindowID>()
+        return filter { seenWindowIDs.insert($0.windowID).inserted }
+    }
 }
 
 // MARK: - Comparable

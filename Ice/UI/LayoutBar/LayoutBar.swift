@@ -10,13 +10,20 @@ struct LayoutBar: View {
         let appState: AppState
         let section: MenuBarSection
         let spacing: CGFloat
+        let allowsDragging: Bool
 
         func makeNSView(context: Context) -> LayoutBarScrollView {
-            LayoutBarScrollView(appState: appState, section: section, spacing: spacing)
+            LayoutBarScrollView(
+                appState: appState,
+                section: section,
+                spacing: spacing,
+                allowsDragging: allowsDragging
+            )
         }
 
         func updateNSView(_ nsView: LayoutBarScrollView, context: Context) {
             nsView.spacing = spacing
+            nsView.allowsDragging = allowsDragging
         }
     }
 
@@ -25,6 +32,7 @@ struct LayoutBar: View {
 
     let section: MenuBarSection
     let spacing: CGFloat
+    let allowsDragging: Bool
 
     private var menuBarManager: MenuBarManager {
         appState.menuBarManager
@@ -34,9 +42,10 @@ struct LayoutBar: View {
         RoundedRectangle(cornerRadius: 9, style: .circular)
     }
 
-    init(section: MenuBarSection, spacing: CGFloat = 0) {
+    init(section: MenuBarSection, spacing: CGFloat = 0, allowsDragging: Bool = true) {
         self.section = section
         self.spacing = spacing
+        self.allowsDragging = allowsDragging
     }
 
     var body: some View {
@@ -57,7 +66,12 @@ struct LayoutBar: View {
             Text("Unable to display menu bar items")
                 .foregroundStyle(menuBarManager.averageColorInfo?.color.brightness ?? 0 > 0.67 ? .black : .white)
         } else {
-            Representable(appState: appState, section: section, spacing: spacing)
+            Representable(
+                appState: appState,
+                section: section,
+                spacing: spacing,
+                allowsDragging: allowsDragging
+            )
         }
     }
 }
