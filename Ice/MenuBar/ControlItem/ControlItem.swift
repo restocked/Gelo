@@ -62,11 +62,17 @@ final class ControlItem {
     }
 
     /// The identifier of the control item's window.
+    ///
+    /// Returns `nil` if no window is available, or if the window's identifier
+    /// cannot be represented in a `CGWindowID`. The latter occurs on macOS 26
+    /// (Tahoe), where `NSWindow.windowNumber` can exceed `CGWindowID`'s
+    /// `UInt32` range; callers must treat `nil` as "use a different
+    /// identification path" (e.g. frame matching) rather than "no window".
     var windowID: CGWindowID? {
         guard let window else {
             return nil
         }
-        return CGWindowID(window.windowNumber)
+        return CGWindowID(exactly: window.windowNumber)
     }
 
     /// A Boolean value that indicates whether the control item serves as
@@ -102,6 +108,15 @@ final class ControlItem {
         self.statusItem.autosaveName = autosaveName
         self.identifier = identifier
         self.appState = appState
+
+        // Stamp the button with the identifier so it can be located via the
+        // Accessibility API, which is the only reliable way to recover our
+        // own control items on macOS 26 (Tahoe). On Tahoe, the window list
+        // reports all items as owned by Control Center and the AppKit-side
+        // `button.window.frame` is a phantom positioning frame, not the
+        // rendered menu bar position; AX still reports the real frame, and
+        // a stable `accessibilityIdentifier` lets us pick out our items.
+        self.statusItem.button?.setAccessibilityIdentifier(autosaveName)
 
         // This could break in a new macOS release, but we need this constraint in order to be
         // able to hide the control item when the `ShowSectionDividers` setting is disabled. A

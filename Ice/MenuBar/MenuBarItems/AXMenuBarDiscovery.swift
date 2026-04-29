@@ -16,7 +16,52 @@ import Cocoa
 struct AXMenuBarItemIdentity {
     let bundleIdentifier: String?
     let title: String?
+    let identifier: String?
+    let description: String?
+    let help: String?
+    let valueDescription: String?
     let frame: CGRect
+
+    var bestTitle: String {
+        Self.bestTitle(
+            title: title,
+            identifier: identifier,
+            description: description,
+            help: help,
+            valueDescription: valueDescription
+        )
+    }
+
+    private static func bestTitle(
+        title: String?,
+        identifier: String?,
+        description: String?,
+        help: String?,
+        valueDescription: String?
+    ) -> String {
+        let candidates = [
+            title,
+            description,
+            valueDescription,
+            help,
+            identifier,
+        ]
+
+        let values = candidates.compactMap { $0?.nonEmptyTrimmedValue }
+
+        if let meaningful = values.first(where: { !isGenericName($0) }) {
+            return meaningful
+        }
+
+        return values.first ?? ""
+    }
+
+    private static func isGenericName(_ value: String) -> Bool {
+        guard value.hasPrefix("Item-") else {
+            return false
+        }
+        return value.dropFirst("Item-".count).allSatisfy(\.isNumber)
+    }
 }
 
 /// A frame-based key used to look up an `AXMenuBarItemIdentity` from a
@@ -43,6 +88,8 @@ struct AXFrameKey: Hashable {
 /// Discovers menu bar items via the system-wide Accessibility tree and exposes
 /// a frame-keyed lookup table mapping CG-coordinate frames to identity records.
 enum AXMenuBarDiscovery {
+    private static let frameTolerance: CGFloat = 2
+
     /// Builds an identity map keyed by integer-rounded CG frame.
     ///
     /// Returns an empty map when accessibility permission has not been granted
@@ -50,41 +97,82 @@ enum AXMenuBarDiscovery {
     /// gracefully when an item is not present in the map.
     @MainActor
     static func buildIdentityMap() -> [AXFrameKey: AXMenuBarItemIdentity] {
-        guard let primary = NSScreen.screens.first else {
-            return [:]
-        }
-        guard
-            let menuBar = try? systemWideElement.elementAtPosition(
-                Float(primary.frame.minX),
-                Float(primary.frame.minY)
-            ),
-            let role = try? menuBar.role(),
-            role == .menuBar,
-            let children: [UIElement] = try? menuBar.arrayAttribute(.children)
-        else {
-            return [:]
-        }
-
         var map: [AXFrameKey: AXMenuBarItemIdentity] = [:]
 
-        for child in children {
-            let frame: CGRect? = try? child.attribute(.frame)
-            guard let frame else {
+        for app in NSWorkspace.shared.runningApplications {
+            guard
+                app.isFinishedLaunching,
+                !app.isTerminated,
+                app.activationPolicy != .prohibited,
+                Bridging.responsivity(for: app.processIdentifier) != .unresponsive,
+                let menuBarApp = Application(app),
+                let extrasMenuBar: UIElement = try? menuBarApp.attribute(.extrasMenuBar),
+                let children: [UIElement] = try? extrasMenuBar.arrayAttribute(.children)
+            else {
                 continue
             }
-            let title: String? = try? child.attribute(.title)
-            let pid = (try? child.pid()) ?? 0
-            let bundleIdentifier = pid > 0
-                ? NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
-                : nil
 
-            map[AXFrameKey(frame)] = AXMenuBarItemIdentity(
-                bundleIdentifier: bundleIdentifier,
-                title: title,
-                frame: frame
-            )
+            let bundleIdentifier = app.bundleIdentifier ?? app.localizedName ?? "\(app.processIdentifier)"
+
+            for child in children {
+                let frame: CGRect? = try? child.attribute(.frame)
+                guard let frame else {
+                    continue
+                }
+                let title: String? = try? child.attribute(.title)
+                let identifier: String? = try? child.attribute(.identifier)
+                let description: String? = try? child.attribute(.description)
+                let help: String? = try? child.attribute(.help)
+                let valueDescription: String? = try? child.attribute(.valueDescription)
+
+                map[AXFrameKey(frame)] = AXMenuBarItemIdentity(
+                    bundleIdentifier: bundleIdentifier,
+                    title: title,
+                    identifier: identifier,
+                    description: description,
+                    help: help,
+                    valueDescription: valueDescription,
+                    frame: frame
+                )
+            }
         }
 
         return map
+    }
+
+    static func identity(
+        in map: [AXFrameKey: AXMenuBarItemIdentity],
+        matching frame: CGRect
+    ) -> AXMenuBarItemIdentity? {
+        if let exact = map[AXFrameKey(frame)] {
+            return exact
+        }
+
+        return map.values
+            .filter { framesMatch($0.frame, frame) }
+            .min { $0.frame.centerDistance(to: frame) < $1.frame.centerDistance(to: frame) }
+    }
+
+    private static func framesMatch(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        lhs.centerDistance(to: rhs) <= frameTolerance &&
+        abs(lhs.width - rhs.width) <= frameTolerance &&
+        abs(lhs.height - rhs.height) <= frameTolerance
+    }
+}
+
+private extension String {
+    var nonEmptyTrimmedValue: String? {
+        let value = trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+}
+
+private extension CGRect {
+    var center: CGPoint {
+        CGPoint(x: midX, y: midY)
+    }
+
+    func centerDistance(to other: CGRect) -> CGFloat {
+        hypot(center.x - other.center.x, center.y - other.center.y)
     }
 }

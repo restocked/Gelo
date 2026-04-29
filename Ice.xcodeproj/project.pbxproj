@@ -15,7 +15,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		7166832A2A767E6A006ABF84 /* Ice.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Ice.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		7166832A2A767E6A006ABF84 /* Gelo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Gelo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -60,7 +60,7 @@
 		7166832B2A767E6A006ABF84 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				7166832A2A767E6A006ABF84 /* Ice.app */,
+				7166832A2A767E6A006ABF84 /* Gelo.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -93,7 +93,7 @@
 				7127A9FE2C4886D100D99DEF /* IfritStatic */,
 			);
 			productName = Ice;
-			productReference = 7166832A2A767E6A006ABF84 /* Ice.app */;
+			productReference = 7166832A2A767E6A006ABF84 /* Gelo.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -310,6 +310,7 @@
 				CURRENT_PROJECT_VERSION = 1117;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_ASSET_PATHS = "";
+				DEVELOPMENT_TEAM = EE7ZCT2LWS;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -344,6 +345,7 @@
 				CURRENT_PROJECT_VERSION = 1117;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_ASSET_PATHS = "";
+				DEVELOPMENT_TEAM = EE7ZCT2LWS;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;

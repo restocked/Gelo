@@ -123,10 +123,15 @@ final class AppState: ObservableObject {
             settingsWindow.publisher(for: \.isVisible)
                 .debounce(for: 0.05, scheduler: DispatchQueue.main)
                 .sink { [weak self] isVisible in
-                    guard let self else {
-                        return
+                    DispatchQueue.main.async { [weak self] in
+                        guard
+                            let self,
+                            self.navigationState.isSettingsPresented != isVisible
+                        else {
+                            return
+                        }
+                        self.navigationState.isSettingsPresented = isVisible
                     }
-                    navigationState.isSettingsPresented = isVisible
                 }
                 .store(in: &c)
         } else {
@@ -146,8 +151,21 @@ final class AppState: ObservableObject {
                 return
             }
             Task.detached {
+                try? await Task.sleep(for: .milliseconds(100))
+                let shouldUpdateImages = await MainActor.run {
+                    self.navigationState.isIceBarPresented ||
+                    self.navigationState.isSearchPresented ||
+                    (
+                        self.navigationState.isSettingsPresented &&
+                        self.navigationState.settingsNavigationIdentifier == .menuBarLayout
+                    )
+                }
+                guard shouldUpdateImages else {
+                    return
+                }
+                await self.itemManager.warmLayoutCacheForSettings()
                 if ScreenCapture.cachedCheckPermissions(reset: true) {
-                    await self.imageCache.updateCacheWithoutChecks(sections: MenuBarSection.Name.allCases)
+                    await self.imageCache.updateCache(sections: MenuBarSection.Name.allCases)
                 }
             }
         }

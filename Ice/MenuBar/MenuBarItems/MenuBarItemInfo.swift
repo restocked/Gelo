@@ -21,6 +21,14 @@ struct MenuBarItemInfo: Hashable, CustomStringConvertible {
         namespace.rawValue + ":" + title
     }
 
+    /// A Boolean value that indicates whether this info is a generic Control
+    /// Center placeholder rather than a unique item identity.
+    var isGenericControlCenterItem: Bool {
+        namespace == .controlCenter &&
+        title.hasPrefix("Item-") &&
+        title.dropFirst("Item-".count).allSatisfy(\.isNumber)
+    }
+
     /// Creates a simplified item with the given namespace and title.
     init(namespace: Namespace, title: String) {
         self.namespace = namespace
@@ -61,6 +69,12 @@ extension MenuBarItemInfo {
     static let clock = MenuBarItemInfo(
         namespace: .controlCenter,
         title: "Clock"
+    )
+
+    /// Information for the system menu bar alcove placeholder.
+    static let alcove = MenuBarItemInfo(
+        namespace: .controlCenter,
+        title: "Alcove"
     )
 
     /// Information for the "Siri" item.

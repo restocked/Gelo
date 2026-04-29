@@ -21,6 +21,11 @@ final class MenuBarItemManager: ObservableObject {
             }
         }
 
+        /// A Boolean value that indicates whether the cache contains no items.
+        var isEmpty: Bool {
+            allItems.isEmpty
+        }
+
         /// The cached menu bar items managed by Ice.
         var managedItems: [MenuBarItem] {
             MenuBarSection.Name.allCases.reduce(into: []) { result, section in
@@ -54,7 +59,13 @@ final class MenuBarItemManager: ObservableObject {
 
         /// Returns the name of the section for the given menu bar item.
         func section(for item: MenuBarItem) -> MenuBarSection.Name? {
-            for (section, items) in self.items where items.contains(where: { $0.info == item.info }) {
+            for (section, items) in self.items where items.contains(where: { $0.windowID == item.windowID }) {
+                return section
+            }
+            guard !item.hasGenericIdentity else {
+                return nil
+            }
+            for (section, items) in self.items where items.contains(where: { !$0.hasGenericIdentity && $0.info == item.info }) {
                 return section
             }
             return nil
@@ -63,12 +74,15 @@ final class MenuBarItemManager: ObservableObject {
         /// Accesses the items in the given section.
         subscript(section: MenuBarSection.Name) -> [MenuBarItem] {
             get { items[section, default: []] }
-            set { items[section] = newValue }
+            set { items[section] = newValue.uniquedByWindowID() }
         }
     }
 
     /// Context for a temporarily shown menu bar item.
     private struct TempShownItemContext {
+        /// The current runtime window identifier associated with the item.
+        let windowID: CGWindowID
+
         /// The information associated with the item.
         let info: MenuBarItemInfo
 
@@ -91,6 +105,17 @@ final class MenuBarItemManager: ObservableObject {
             } else {
                 currentWindow.isOnScreen
             }
+        }
+
+        /// Returns whether this context belongs to the given runtime item.
+        func matches(_ item: MenuBarItem) -> Bool {
+            if item.windowID == windowID {
+                return true
+            }
+            guard !item.hasGenericIdentity else {
+                return false
+            }
+            return item.info == info
         }
     }
 
@@ -198,6 +223,22 @@ final class MenuBarItemManager: ObservableObject {
             }
             .store(in: &c)
 
+        if let appState {
+            appState.navigationState.$settingsNavigationIdentifier
+                .removeDuplicates()
+                .debounce(for: 0.1, scheduler: DispatchQueue.main)
+                .sink { [weak self] identifier in
+                    guard let self, identifier == .menuBarLayout else {
+                        return
+                    }
+                    Task {
+                        try? await Task.sleep(for: .milliseconds(100))
+                        await self.warmLayoutCacheForSettings()
+                    }
+                }
+                .store(in: &c)
+        }
+
         Publishers.Merge(
             UniversalEventMonitor.publisher(for: mouseTrackingMask),
             RunLoopLocalEventMonitor.publisher(for: mouseTrackingMask, mode: .eventTracking)
@@ -227,6 +268,54 @@ final class MenuBarItemManager: ObservableObject {
 // MARK: - Cache Items
 
 extension MenuBarItemManager {
+    /// Warms the item cache for the layout settings UI.
+    ///
+    /// The layout pane can render from a recently built cache. Force a rebuild
+    /// only when the cache is empty; otherwise use the cheap window-list check
+    /// so opening the tab does not block on Tahoe identity discovery.
+    func warmLayoutCacheForSettings() async {
+        if itemCache.isEmpty {
+            await cacheItemsRegardless()
+        } else {
+            await cacheItemsIfNeeded()
+        }
+    }
+
+    /// Caches the current menu bar items without relying on the last seen window
+    /// list. Reordering usually changes frames without changing window IDs.
+    func cacheItemsRegardless() async {
+        cachedItemWindowIDs.removeAll()
+        await cacheItemsIfNeeded()
+    }
+
+    /// Builds auxiliary identity maps for menu bar item discovery.
+    private func buildIdentityMaps() -> (
+        controlItemMap: [CGWindowID: ControlItem.Identifier],
+        axMap: [AXFrameKey: AXMenuBarItemIdentity]
+    ) {
+        let sections = appState?.menuBarManager.sections ?? []
+        return (
+            ControlItemDiscovery.buildMap(for: sections),
+            AXMenuBarDiscovery.buildIdentityMap()
+        )
+    }
+
+    /// Returns menu bar items using Tahoe-safe identity recovery.
+    private func getMenuBarItems(
+        on display: CGDirectDisplayID? = nil,
+        onScreenOnly: Bool,
+        activeSpaceOnly: Bool
+    ) -> [MenuBarItem] {
+        let identityMaps = buildIdentityMaps()
+        return MenuBarItem.getMenuBarItems(
+            on: display,
+            onScreenOnly: onScreenOnly,
+            activeSpaceOnly: activeSpaceOnly,
+            controlItemMap: identityMaps.controlItemMap,
+            axMap: identityMaps.axMap
+        )
+    }
+
     /// Logs a warning that the given menu bar item was not added to the cache.
     private func logNotCachedWarning(for item: MenuBarItem) {
         Logger.itemManager.warning("\(item.logString) was not cached")
@@ -255,7 +344,7 @@ extension MenuBarItemManager {
         var tempShownItems = [(MenuBarItem, MoveDestination)]()
 
         for item in otherItems {
-            if let context = tempShownItemContexts.first(where: { $0.info == item.info }) {
+            if let context = tempShownItemContexts.first(where: { $0.matches(item) }) {
                 // Keep track of temporarily shown items and their return destinations separately.
                 // We want to cache them as if they were in their original locations. Once all other
                 // items are cached, use the return destinations to insert the items into the cache
@@ -283,7 +372,7 @@ extension MenuBarItemManager {
                 default:
                     if
                         let section = cache.section(for: targetItem),
-                        let index = cache[section].firstIndex(matching: targetItem.info)
+                        let index = cache[section].firstIndex(matching: targetItem)
                     {
                         let clampedIndex = index.clamped(to: cache[section].startIndex...cache[section].endIndex)
                         cache[section].insert(item, at: clampedIndex)
@@ -298,7 +387,7 @@ extension MenuBarItemManager {
                 default:
                     if
                         let section = cache.section(for: targetItem),
-                        let index = cache[section].firstIndex(matching: targetItem.info)
+                        let index = cache[section].firstIndex(matching: targetItem)
                     {
                         let clampedIndex = (index - 1).clamped(to: cache[section].startIndex...cache[section].endIndex)
                         cache[section].insert(item, at: clampedIndex)
@@ -329,29 +418,26 @@ extension MenuBarItemManager {
         if cachedItemWindowIDs == itemWindowIDs {
             logSkippingCache(reason: "item windows have not changed")
             return
-        } else {
-            cachedItemWindowIDs = itemWindowIDs
         }
 
-        // Build auxiliary identity maps so items can be identified on macOS
-        // versions where the window list APIs no longer expose bundle
-        // identifier or window title (e.g. macOS 26 / Tahoe).
-        let sections = appState?.menuBarManager.sections ?? []
-        let controlItemMap = ControlItemDiscovery.buildMap(for: sections)
-        let axMap = AXMenuBarDiscovery.buildIdentityMap()
-
+        let identityMaps = buildIdentityMaps()
         var items = MenuBarItem.getMenuBarItems(
             onScreenOnly: false,
             activeSpaceOnly: true,
-            controlItemMap: controlItemMap,
-            axMap: axMap
+            controlItemMap: identityMaps.controlItemMap,
+            axMap: identityMaps.axMap
         )
+        let discoveredItemLogString = items.map(\.logString).joined(separator: " | ")
 
         let hiddenControlItem = items.firstIndex(matching: .hiddenControlItem).map { items.remove(at: $0) }
         let alwaysHiddenControlItem = items.firstIndex(matching: .alwaysHiddenControlItem).map { items.remove(at: $0) }
 
         guard let hiddenControlItem else {
             Logger.itemManager.warning("Missing control item for hidden section")
+            Logger.itemManager.debug(
+                "Control item map: \(identityMaps.controlItemMap.values.map(\.rawValue).sorted().joined(separator: ", ")); " +
+                "discovered items: \(discoveredItemLogString)"
+            )
             Logger.itemManager.debug("Clearing menu bar item cache")
             itemCache.clear()
             return
@@ -369,6 +455,7 @@ extension MenuBarItemManager {
                 alwaysHiddenControlItem: alwaysHiddenControlItem,
                 otherItems: items
             )
+            cachedItemWindowIDs = itemWindowIDs
         } catch {
             Logger.itemManager.error("Error enforcing control item order: \(error)")
             Logger.itemManager.debug("Clearing menu bar item cache")
@@ -647,7 +734,13 @@ extension MenuBarItemManager {
     /// - Parameters:
     ///   - item: The item to check the position of.
     ///   - destination: The destination to compare the item's position against.
-    private func itemHasCorrectPosition(item: MenuBarItem, for destination: MoveDestination) throws -> Bool {
+    private func itemHasCorrectPosition(
+        item: MenuBarItem,
+        for destination: MoveDestination,
+        requireAdjacency: Bool = true
+    ) throws -> Bool {
+        let edgeTolerance: CGFloat = 2
+
         guard let currentFrame = getCurrentFrame(for: item) else {
             throw EventError(code: .invalidItem, item: item)
         }
@@ -656,13 +749,47 @@ extension MenuBarItemManager {
             guard let currentTargetFrame = getCurrentFrame(for: targetItem) else {
                 throw EventError(code: .invalidItem, item: targetItem)
             }
-            return currentFrame.maxX == currentTargetFrame.minX
+            if requireAdjacency {
+                return abs(currentFrame.maxX - currentTargetFrame.minX) <= edgeTolerance
+            }
+            return currentFrame.midX < currentTargetFrame.midX
         case .rightOfItem(let targetItem):
             guard let currentTargetFrame = getCurrentFrame(for: targetItem) else {
                 throw EventError(code: .invalidItem, item: targetItem)
             }
-            return currentFrame.minX == currentTargetFrame.maxX
+            if requireAdjacency {
+                return abs(currentFrame.minX - currentTargetFrame.maxX) <= edgeTolerance
+            }
+            return currentFrame.midX > currentTargetFrame.midX
         }
+    }
+
+    /// Returns a Boolean value that indicates whether a move changed the item
+    /// and left it on the expected side of its target.
+    ///
+    /// Hidden-section items can land at negative/offscreen coordinates, and
+    /// visible-section items can be separated by system spacing after macOS
+    /// reflows the menu bar. Keep strict adjacency as the best signal, but
+    /// allow a same-side result when the item frame changed and the target
+    /// frame remains usable.
+    private func itemHasCompletedMove(
+        item: MenuBarItem,
+        to destination: MoveDestination,
+        initialFrame: CGRect
+    ) throws -> Bool {
+        guard let newFrame = getCurrentFrame(for: item), newFrame != initialFrame else {
+            return false
+        }
+
+        if try itemHasCorrectPosition(item: item, for: destination) {
+            return true
+        }
+
+        return try itemHasCorrectPosition(
+            item: item,
+            for: destination,
+            requireAdjacency: false
+        )
     }
 
     /// Returns a Boolean value that indicates whether the given events have the
@@ -1011,6 +1138,9 @@ extension MenuBarItemManager {
         let endPoint = try getEndPoint(for: destination)
         let fallbackPoint = try getFallbackPoint(for: item)
         let targetItem = getTargetItem(for: destination)
+        guard targetItem.hasMoveDestinationFrame else {
+            throw EventError(code: .invalidItem, item: targetItem)
+        }
 
         guard
             let mouseDownEvent = CGEvent.menuBarItemEvent(
@@ -1084,7 +1214,12 @@ extension MenuBarItemManager {
     /// - Parameters:
     ///   - item: A menu bar item to move.
     ///   - destination: A destination to move the menu bar item.
-    func move(item: MenuBarItem, to destination: MoveDestination) async throws {
+    func move(
+        item: MenuBarItem,
+        to destination: MoveDestination,
+        maxAttempts: Int = 5,
+        wakeUpOnFailure: Bool = true
+    ) async throws {
         if try itemHasCorrectPosition(item: item, for: destination) {
             Logger.itemManager.debug("\(item.logString) is already in the correct position")
             return
@@ -1123,23 +1258,33 @@ extension MenuBarItemManager {
             MouseCursor.show()
         }
 
-        // Item movement can occasionally fail. Retry up to a total of 5 attempts,
+        // Item movement can occasionally fail. Retry a bounded number of times,
         // throwing the last attempt's error if it fails.
-        for n in 1...5 {
+        for n in 1...max(1, maxAttempts) {
             do {
                 try await moveItemWithoutRestoringMouseLocation(item, to: destination)
-                guard let newFrame = getCurrentFrame(for: item) else {
-                    throw EventError(code: .invalidItem, item: item)
-                }
-                if newFrame != initialFrame {
+                if try itemHasCompletedMove(item: item, to: destination, initialFrame: initialFrame) {
                     Logger.itemManager.info("Successfully moved \(item.logString)")
                     break
                 } else {
                     throw EventError(code: .couldNotComplete, item: item)
                 }
-            } catch where n < 5 {
+            } catch {
+                if (try? itemHasCompletedMove(item: item, to: destination, initialFrame: initialFrame)) == true {
+                    Logger.itemManager.info("Successfully moved \(item.logString) despite event error: \(error)")
+                    break
+                }
+
+                guard n < max(1, maxAttempts) else {
+                    throw error
+                }
+
                 Logger.itemManager.warning("Attempt \(n) to move \(item.logString) failed (error: \(error))")
-                try await wakeUpItem(item)
+                if wakeUpOnFailure {
+                    try await wakeUpItem(item)
+                } else {
+                    try await Task.sleep(for: .milliseconds(75))
+                }
                 Logger.itemManager.info("Retrying move of \(item.logString)")
                 continue
             }
@@ -1162,9 +1307,10 @@ extension MenuBarItemManager {
         let waitTask = Task(timeout: timeout) {
             while true {
                 try Task.checkCancellation()
-                if try await self.itemHasCorrectPosition(item: item, for: destination) {
+                if try await self.itemHasCorrectPosition(item: item, for: destination, requireAdjacency: false) {
                     return
                 }
+                try await Task.sleep(for: .milliseconds(10))
             }
         }
         do {
@@ -1270,8 +1416,7 @@ extension MenuBarItemManager {
 extension MenuBarItemManager {
     /// Gets the destination to return the given item to after it is temporarily shown.
     private func getReturnDestination(for item: MenuBarItem, in items: [MenuBarItem]) -> MoveDestination? {
-        let info = item.info
-        if let index = items.firstIndex(where: { $0.info == info }) {
+        if let index = items.firstIndex(matching: item) {
             if items.indices.contains(index + 1) {
                 return .leftOfItem(items[index + 1])
             } else if items.indices.contains(index - 1) {
@@ -1337,7 +1482,7 @@ extension MenuBarItemManager {
 
         Logger.itemManager.info("Temporarily showing \(item.logString)")
 
-        var items = MenuBarItem.getMenuBarItems(onScreenOnly: false, activeSpaceOnly: true)
+        var items = getMenuBarItems(onScreenOnly: false, activeSpaceOnly: true)
 
         guard let destination = getReturnDestination(for: item, in: items) else {
             Logger.itemManager.warning("No return destination for \(item.logString)")
@@ -1397,6 +1542,7 @@ extension MenuBarItemManager {
             }
 
             let context = TempShownItemContext(
+                windowID: item.windowID,
                 info: item.info,
                 returnDestination: destination,
                 shownInterfaceWindow: shownInterfaceWindow
@@ -1435,7 +1581,7 @@ extension MenuBarItemManager {
 
         var failedContexts = [TempShownItemContext]()
 
-        let items = MenuBarItem.getMenuBarItems(onScreenOnly: false, activeSpaceOnly: true)
+        let items = getMenuBarItems(onScreenOnly: false, activeSpaceOnly: true)
 
         MouseCursor.hide()
 
@@ -1444,7 +1590,7 @@ extension MenuBarItemManager {
         }
 
         while let context = tempShownItemContexts.popLast() {
-            guard let item = items.first(where: { $0.info == context.info }) else {
+            guard let item = items.first(where: { context.matches($0) }) else {
                 continue
             }
             do {
@@ -1468,8 +1614,8 @@ extension MenuBarItemManager {
     /// Removes a temporarily shown item from the cache.
     ///
     /// This ensures that the item will _not_ be returned to its previous location.
-    func removeTempShownItemFromCache(with info: MenuBarItemInfo) {
-        tempShownItemContexts.removeAll { $0.info == info }
+    func removeTempShownItemFromCache(with item: MenuBarItem) {
+        tempShownItemContexts.removeAll { $0.matches(item) }
     }
 }
 

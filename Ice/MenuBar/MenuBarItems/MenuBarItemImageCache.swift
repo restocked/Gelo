@@ -8,8 +8,22 @@ import Combine
 
 /// Cache for menu bar item images.
 final class MenuBarItemImageCache: ObservableObject {
+    /// Captured menu bar item images keyed by both stable item identity and
+    /// current window identity.
+    private struct CapturedImages {
+        var imagesByInfo = [MenuBarItemInfo: CGImage]()
+        var imagesByWindowID = [CGWindowID: CGImage]()
+    }
+
     /// The cached item images.
     @Published private(set) var images = [MenuBarItemInfo: CGImage]()
+
+    /// The cached item images keyed by their current window IDs.
+    ///
+    /// On macOS 26, multiple menu bar windows can share the same app/title
+    /// identity, so UI rendering must prefer this cache to avoid reusing one
+    /// captured image for several distinct windows.
+    @Published private(set) var windowImages = [CGWindowID: CGImage]()
 
     /// The screen of the cached item images.
     private(set) var screen: NSScreen?
@@ -90,8 +104,12 @@ final class MenuBarItemImageCache: ObservableObject {
         guard !items.isEmpty else {
             return false
         }
-        let keys = Set(images.keys)
-        for item in items where keys.contains(item.info) {
+        let imageWindowIDs = Set(windowImages.keys)
+        let imageInfos = Set(images.keys)
+        for item in items
+            where imageWindowIDs.contains(item.windowID) ||
+            (!item.hasGenericIdentity && imageInfos.contains(item.info))
+        {
             return false
         }
         return true
@@ -99,14 +117,14 @@ final class MenuBarItemImageCache: ObservableObject {
 
     /// Captures the images of the current menu bar items and returns a dictionary containing
     /// the images, keyed by the current menu bar item infos.
-    func createImages(for section: MenuBarSection.Name, screen: NSScreen) async -> [MenuBarItemInfo: CGImage] {
+    private func createImages(for section: MenuBarSection.Name, screen: NSScreen) async -> CapturedImages {
         guard let appState else {
-            return [:]
+            return CapturedImages()
         }
 
         let items = await appState.itemManager.itemCache[section]
 
-        var images = [MenuBarItemInfo: CGImage]()
+        var capturedImages = CapturedImages()
         let backingScaleFactor = screen.backingScaleFactor
         let displayBounds = CGDisplayBounds(screen.displayID)
         let option: CGWindowImageOption = [.boundsIgnoreFraming, .bestResolution]
@@ -126,7 +144,9 @@ final class MenuBarItemImageCache: ObservableObject {
             else {
                 continue
             }
-            itemInfos[windowID] = item.info
+            if !item.hasGenericIdentity {
+                itemInfos[windowID] = item.info
+            }
             itemFrames[windowID] = itemFrame
             windowIDs.append(windowID)
             frame = frame.union(itemFrame)
@@ -138,7 +158,6 @@ final class MenuBarItemImageCache: ObservableObject {
         {
             for windowID in windowIDs {
                 guard
-                    let itemInfo = itemInfos[windowID],
                     let itemFrame = itemFrames[windowID]
                 else {
                     continue
@@ -155,14 +174,16 @@ final class MenuBarItemImageCache: ObservableObject {
                     continue
                 }
 
-                images[itemInfo] = itemImage
+                if let itemInfo = itemInfos[windowID] {
+                    capturedImages.imagesByInfo[itemInfo] = itemImage
+                }
+                capturedImages.imagesByWindowID[windowID] = itemImage
             }
         } else {
             Logger.imageCache.warning("Composite image capture failed. Attempting to capturing items individually.")
 
             for windowID in windowIDs {
                 guard
-                    let itemInfo = itemInfos[windowID],
                     let itemFrame = itemFrames[windowID]
                 else {
                     continue
@@ -182,11 +203,14 @@ final class MenuBarItemImageCache: ObservableObject {
                     continue
                 }
 
-                images[itemInfo] = croppedImage
+                if let itemInfo = itemInfos[windowID] {
+                    capturedImages.imagesByInfo[itemInfo] = croppedImage
+                }
+                capturedImages.imagesByWindowID[windowID] = croppedImage
             }
         }
 
-        return images
+        return capturedImages
     }
 
     /// Updates the cache for the given sections, without checking whether caching is necessary.
@@ -199,27 +223,33 @@ final class MenuBarItemImageCache: ObservableObject {
         }
 
         var newImages = [MenuBarItemInfo: CGImage]()
+        var newWindowImages = [CGWindowID: CGImage]()
 
         for section in sections {
             guard await !appState.itemManager.itemCache[section].isEmpty else {
                 continue
             }
             let sectionImages = await createImages(for: section, screen: screen)
-            guard !sectionImages.isEmpty else {
+            guard !sectionImages.imagesByWindowID.isEmpty else {
                 Logger.imageCache.warning("Update image cache failed for \(section.logString)")
                 continue
             }
-            newImages.merge(sectionImages) { (_, new) in new }
+            newImages.merge(sectionImages.imagesByInfo) { (_, new) in new }
+            newWindowImages.merge(sectionImages.imagesByWindowID) { (_, new) in new }
         }
 
         // Get the set of valid item infos from all sections to clean up stale entries
-        let allValidInfos = await Set(appState.itemManager.itemCache.allItems.map(\.info))
+        let allItems = await appState.itemManager.itemCache.allItems
+        let allValidInfos = Set(allItems.map(\.info))
+        let allValidWindowIDs = Set(allItems.map(\.windowID))
 
-        await MainActor.run { [newImages, allValidInfos] in
+        await MainActor.run { [newImages, newWindowImages, allValidInfos, allValidWindowIDs] in
             // Remove images for items that no longer exist in the item cache
             images = images.filter { allValidInfos.contains($0.key) }
+            windowImages = windowImages.filter { allValidWindowIDs.contains($0.key) }
             // Merge in the new images
             images.merge(newImages) { (_, new) in new }
+            windowImages.merge(newWindowImages) { (_, new) in new }
         }
 
         self.screen = screen

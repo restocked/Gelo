@@ -90,11 +90,12 @@ final class LayoutBarItemView: NSView {
         var c = Set<AnyCancellable>()
 
         if let appState {
-            appState.imageCache.$images
-                .sink { [weak self] images in
+            appState.imageCache.$windowImages
+                .combineLatest(appState.imageCache.$images)
+                .sink { [weak self] windowImages, images in
                     guard
                         let self,
-                        let cgImage = images[item.info]
+                        let cgImage = windowImages[item.windowID] ?? (item.hasGenericIdentity ? nil : images[item.info])
                     else {
                         return
                     }

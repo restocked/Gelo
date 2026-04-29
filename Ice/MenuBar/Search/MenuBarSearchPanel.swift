@@ -176,7 +176,7 @@ private struct MenuBarSearchContentView: View {
 
     private enum ItemID: Hashable {
         case header(MenuBarSection.Name)
-        case item(MenuBarItemInfo)
+        case item(CGWindowID)
     }
 
     @EnvironmentObject var itemManager: MenuBarItemManager
@@ -269,7 +269,7 @@ private struct MenuBarSearchContentView: View {
             items.append((headerItem, section.displayString))
 
             for item in itemManager.itemCache.managedItems(for: section).reversed() {
-                let listItem = ListItem.item(id: .item(item.info)) {
+                let listItem = ListItem.item(id: .item(item.windowID)) {
                     performAction(for: item)
                 } content: {
                     MenuBarSearchItemView(item: item)
@@ -294,8 +294,8 @@ private struct MenuBarSearchContentView: View {
 
     private func menuBarItem(for selection: ItemID) -> MenuBarItem? {
         switch selection {
-        case .item(let info):
-            itemManager.itemCache.managedItems.first { $0.info == info }
+        case .item(let windowID):
+            itemManager.itemCache.managedItems.first { $0.windowID == windowID }
         case .header:
             nil
         }
@@ -409,7 +409,8 @@ private struct MenuBarSearchItemView: View {
 
     private var image: NSImage? {
         guard
-            let image = imageCache.images[item.info]?.trimmingTransparentPixels(around: [.minXEdge, .maxXEdge]),
+            let image = (imageCache.windowImages[item.windowID] ?? (item.hasGenericIdentity ? nil : imageCache.images[item.info]))?
+                .trimmingTransparentPixels(around: [.minXEdge, .maxXEdge]),
             let screen = imageCache.screen
         else {
             return nil

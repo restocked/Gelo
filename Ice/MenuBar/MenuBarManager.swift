@@ -185,8 +185,17 @@ final class MenuBarManager: ObservableObject {
                         return
                     }
 
-                    // Get all items.
-                    var items = MenuBarItem.getMenuBarItems(on: displayID, onScreenOnly: false, activeSpaceOnly: true)
+                    // Get all items, using auxiliary identity maps on macOS
+                    // versions where window-list metadata is opaque.
+                    let controlItemMap = ControlItemDiscovery.buildMap(for: sections)
+                    let axMap = AXMenuBarDiscovery.buildIdentityMap()
+                    var items = MenuBarItem.getMenuBarItems(
+                        on: displayID,
+                        onScreenOnly: false,
+                        activeSpaceOnly: true,
+                        controlItemMap: controlItemMap,
+                        axMap: axMap
+                    )
 
                     // Filter the items down according to the currently enabled/shown sections.
                     if
