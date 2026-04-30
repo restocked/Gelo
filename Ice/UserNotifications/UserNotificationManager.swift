@@ -74,7 +74,10 @@ extension UserNotificationManager: @preconcurrency UNUserNotificationCenterDeleg
 
         switch UserNotificationIdentifier(rawValue: response.notification.request.identifier) {
         case .updateCheck:
-            guard response.actionIdentifier == UNNotificationDefaultActionIdentifier else {
+            guard
+                UpdatesManager.isEnabled,
+                response.actionIdentifier == UNNotificationDefaultActionIdentifier
+            else {
                 break
             }
             appState.updatesManager.checkForUpdates()

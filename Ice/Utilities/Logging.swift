@@ -16,22 +16,30 @@ struct Logger {
     }
 
     /// Logs the given informative message to the logger.
-    func info(_ message: String) {
-        base.info("\(message, privacy: .public)")
+    func info(_ message: @autoclosure () -> String) {
+        #if DEBUG
+        let text = message()
+        base.info("\(text, privacy: .public)")
+        #endif
     }
 
     /// Logs the given debug message to the logger.
-    func debug(_ message: String) {
-        base.debug("\(message, privacy: .public)")
+    func debug(_ message: @autoclosure () -> String) {
+        #if DEBUG
+        let text = message()
+        base.debug("\(text, privacy: .public)")
+        #endif
     }
 
     /// Logs the given error message to the logger.
-    func error(_ message: String) {
-        base.error("\(message, privacy: .public)")
+    func error(_ message: @autoclosure () -> String) {
+        let text = message()
+        base.error("\(text, privacy: .public)")
     }
 
     /// Logs the given warning message to the logger.
-    func warning(_ message: String) {
-        base.warning("\(message, privacy: .public)")
+    func warning(_ message: @autoclosure () -> String) {
+        let text = message()
+        base.warning("\(text, privacy: .public)")
     }
 }

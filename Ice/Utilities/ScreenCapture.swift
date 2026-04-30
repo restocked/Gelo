@@ -61,14 +61,17 @@ enum ScreenCapture {
     ///   - screenBounds: The bounds to capture. Pass `nil` to capture the minimum rectangle that encloses the windows.
     ///   - option: Options that specify the image to be captured.
     static func captureWindows(_ windowIDs: [CGWindowID], screenBounds: CGRect? = nil, option: CGWindowImageOption = []) -> CGImage? {
-        let pointer = UnsafeMutablePointer<UnsafeRawPointer?>.allocate(capacity: windowIDs.count)
-        for (index, windowID) in windowIDs.enumerated() {
-            pointer[index] = UnsafeRawPointer(bitPattern: UInt(windowID))
-        }
-        guard let windowArray = CFArrayCreate(kCFAllocatorDefault, pointer, windowIDs.count, nil) else {
+        guard !windowIDs.isEmpty else {
             return nil
         }
-        return .windowListImage(from: screenBounds ?? .null, windowArray: windowArray, imageOption: option)
+
+        var pointers = windowIDs.map { UnsafeRawPointer(bitPattern: UInt($0)) }
+        return pointers.withUnsafeMutableBufferPointer { buffer in
+            guard let windowArray = CFArrayCreate(kCFAllocatorDefault, buffer.baseAddress, buffer.count, nil) else {
+                return nil
+            }
+            return .windowListImage(from: screenBounds ?? .null, windowArray: windowArray, imageOption: option)
+        }
     }
 
     /// Captures an image of a window.

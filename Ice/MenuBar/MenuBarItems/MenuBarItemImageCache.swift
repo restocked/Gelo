@@ -55,8 +55,8 @@ final class MenuBarItemImageCache: ObservableObject {
 
         if let appState {
             Publishers.Merge3(
-                // Update every 3 seconds at minimum.
-                Timer.publish(every: 3, on: .main, in: .default).autoconnect().mapToVoid(),
+                // Keep item images fresh while a UI that displays them is visible.
+                periodicRefreshPublisher(for: appState),
 
                 // Update when the active space or screen parameters change.
                 Publishers.Merge(
@@ -76,7 +76,7 @@ final class MenuBarItemImageCache: ObservableObject {
                 guard let self else {
                     return
                 }
-                Task.detached {
+                Task {
                     if ScreenCapture.cachedCheckPermissions() {
                         await self.updateCache()
                     }
@@ -86,6 +86,42 @@ final class MenuBarItemImageCache: ObservableObject {
         }
 
         cancellables = c
+    }
+
+    @MainActor
+    private func periodicRefreshPublisher(for appState: AppState) -> AnyPublisher<Void, Never> {
+        let navigationState = appState.navigationState
+
+        return Publishers.CombineLatest4(
+            navigationState.$isIceBarPresented,
+            navigationState.$isSearchPresented,
+            navigationState.$isSettingsPresented,
+            navigationState.$settingsNavigationIdentifier
+        )
+        .combineLatest(navigationState.$isAppFrontmost)
+        .map { presentation, isAppFrontmost in
+            let (
+                isIceBarPresented,
+                isSearchPresented,
+                isSettingsPresented,
+                settingsNavigationIdentifier
+            ) = presentation
+
+            return isIceBarPresented ||
+            isSearchPresented ||
+            (isAppFrontmost && isSettingsPresented && settingsNavigationIdentifier == .menuBarLayout)
+        }
+        .removeDuplicates()
+        .flatMap { shouldRefresh -> AnyPublisher<Void, Never> in
+            guard shouldRefresh else {
+                return Empty().eraseToAnyPublisher()
+            }
+
+            return Just(())
+                .merge(with: Timer.publish(every: 3, on: .main, in: .default).autoconnect().mapToVoid())
+                .eraseToAnyPublisher()
+        }
+        .eraseToAnyPublisher()
     }
 
     /// Logs a reason for skipping the cache.
@@ -338,9 +374,13 @@ final class MenuBarItemImageCache: ObservableObject {
         let isIceBarPresented = await appState.navigationState.isIceBarPresented
         let isSearchPresented = await appState.navigationState.isSearchPresented
         let isSettingsPresented = await appState.navigationState.isSettingsPresented
+        let isAppFrontmost = await appState.navigationState.isAppFrontmost
+        let settingsNavigationIdentifier = await appState.navigationState.settingsNavigationIdentifier
 
         var sectionsNeedingDisplay = [MenuBarSection.Name]()
-        if isSettingsPresented || isSearchPresented {
+        if isSearchPresented ||
+            (isAppFrontmost && isSettingsPresented && settingsNavigationIdentifier == .menuBarLayout)
+        {
             sectionsNeedingDisplay = MenuBarSection.Name.allCases
         } else if
             isIceBarPresented,

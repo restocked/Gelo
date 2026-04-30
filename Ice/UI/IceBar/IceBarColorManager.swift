@@ -26,15 +26,16 @@ final class IceBarColorManager: ObservableObject {
         if let iceBarPanel {
             iceBarPanel.publisher(for: \.screen)
                 .receive(on: DispatchQueue.main)
-                .sink { [weak self] screen in
+                .sink { [weak self, weak iceBarPanel] screen in
                     guard
                         let self,
+                        iceBarPanel?.isVisible == true,
                         let screen,
                         screen == .main
                     else {
                         return
                     }
-                    updateWindowImage(for: screen)
+                    updateAllProperties(with: iceBarPanel?.frame ?? .zero, screen: screen)
                 }
                 .store(in: &c)
 
@@ -52,7 +53,7 @@ final class IceBarColorManager: ObservableObject {
                 else {
                     return
                 }
-                updateColorInfo(with: frame, screen: screen)
+                updateAllProperties(with: frame, screen: screen)
             }
             .store(in: &c)
 
@@ -66,9 +67,16 @@ final class IceBarColorManager: ObservableObject {
                 DistributedNotificationCenter.default()
                     .publisher(for: DistributedNotificationCenter.interfaceThemeChangedNotification)
                     .mapToVoid(),
-                Timer.publish(every: 5, on: .main, in: .default)
-                    .autoconnect()
-                    .mapToVoid()
+                iceBarPanel.publisher(for: \.isVisible)
+                    .removeDuplicates()
+                    .flatMap { isVisible -> AnyPublisher<Void, Never> in
+                        guard isVisible else {
+                            return Empty().eraseToAnyPublisher()
+                        }
+                        return Just(())
+                            .merge(with: Timer.publish(every: 5, on: .main, in: .default).autoconnect().mapToVoid())
+                            .eraseToAnyPublisher()
+                    }
             )
             .receive(on: DispatchQueue.main)
             .sink { [weak self, weak iceBarPanel] in
@@ -76,14 +84,12 @@ final class IceBarColorManager: ObservableObject {
                     let self,
                     let iceBarPanel,
                     let screen = iceBarPanel.screen,
+                    iceBarPanel.isVisible,
                     screen == .main
                 else {
                     return
                 }
-                updateWindowImage(for: screen)
-                if iceBarPanel.isVisible {
-                    updateColorInfo(with: iceBarPanel.frame, screen: screen)
-                }
+                updateAllProperties(with: iceBarPanel.frame, screen: screen)
             }
             .store(in: &c)
         }

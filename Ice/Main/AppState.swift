@@ -166,11 +166,13 @@ final class AppState: ObservableObject {
                 self?.objectWillChange.send()
             }
             .store(in: &c)
-        updatesManager.objectWillChange
-            .sink { [weak self] in
-                self?.objectWillChange.send()
-            }
-            .store(in: &c)
+        if UpdatesManager.isEnabled {
+            updatesManager.objectWillChange
+                .sink { [weak self] in
+                    self?.objectWillChange.send()
+                }
+                .store(in: &c)
+        }
 
         cancellables = c
     }
@@ -222,7 +224,9 @@ final class AppState: ObservableObject {
         settingsManager.performSetup()
         itemManager.performSetup()
         imageCache.performSetup()
-        updatesManager.performSetup()
+        if UpdatesManager.isEnabled {
+            updatesManager.performSetup()
+        }
         userNotificationManager.performSetup()
         prewarmLayoutCacheAfterLaunch()
     }

@@ -43,7 +43,12 @@ final class MenuBarManager: ObservableObject {
     /// A Boolean value that indicates whether the manager can update its stored
     /// information for the menu bar's average color.
     private var canUpdateAverageColorInfo: Bool {
-        appState?.settingsWindow?.isVisible == true
+        guard let appState else {
+            return false
+        }
+        return appState.navigationState.isAppFrontmost &&
+        appState.navigationState.isSettingsPresented &&
+        appState.navigationState.settingsNavigationIdentifier == .menuBarLayout
     }
 
     /// Initializes a new menu bar manager instance.
@@ -141,8 +146,7 @@ final class MenuBarManager: ObservableObject {
             }
             .store(in: &c)
 
-        Timer.publish(every: 5, on: .main, in: .default)
-            .autoconnect()
+        averageColorRefreshPublisher()
             .sink { [weak self] _ in
                 self?.updateAverageColorInfo()
             }
@@ -230,6 +234,33 @@ final class MenuBarManager: ObservableObject {
             .store(in: &c)
 
         cancellables = c
+    }
+
+    private func averageColorRefreshPublisher() -> AnyPublisher<Void, Never> {
+        guard let appState else {
+            return Empty().eraseToAnyPublisher()
+        }
+
+        let navigationState = appState.navigationState
+        return Publishers.CombineLatest3(
+            navigationState.$isAppFrontmost,
+            navigationState.$isSettingsPresented,
+            navigationState.$settingsNavigationIdentifier
+        )
+        .map { isAppFrontmost, isSettingsPresented, settingsNavigationIdentifier in
+            isAppFrontmost && isSettingsPresented && settingsNavigationIdentifier == .menuBarLayout
+        }
+        .removeDuplicates()
+        .flatMap { shouldRefresh -> AnyPublisher<Void, Never> in
+            guard shouldRefresh else {
+                return Empty().eraseToAnyPublisher()
+            }
+
+            return Just(())
+                .merge(with: Timer.publish(every: 5, on: .main, in: .default).autoconnect().mapToVoid())
+                .eraseToAnyPublisher()
+        }
+        .eraseToAnyPublisher()
     }
 
     /// Updates the ``averageColorInfo`` property with the current average color

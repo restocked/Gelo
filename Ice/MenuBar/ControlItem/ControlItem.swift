@@ -506,15 +506,17 @@ final class ControlItem {
             menu.addItem(item)
         }
 
-        menu.addItem(.separator())
+        if UpdatesManager.isEnabled {
+            menu.addItem(.separator())
 
-        let checkForUpdatesItem = NSMenuItem(
-            title: "Check for Updates…",
-            action: #selector(checkForUpdates),
-            keyEquivalent: ""
-        )
-        checkForUpdatesItem.target = self
-        menu.addItem(checkForUpdatesItem)
+            let checkForUpdatesItem = NSMenuItem(
+                title: "Check for Updates…",
+                action: #selector(checkForUpdates),
+                keyEquivalent: ""
+            )
+            checkForUpdatesItem.target = self
+            menu.addItem(checkForUpdatesItem)
+        }
 
         menu.addItem(.separator())
 
