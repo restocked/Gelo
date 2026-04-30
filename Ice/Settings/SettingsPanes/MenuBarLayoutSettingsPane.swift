@@ -10,7 +10,7 @@ struct MenuBarLayoutSettingsPane: View {
     @State private var isWarmingLayoutCache = false
 
     var body: some View {
-        if !ScreenCapture.cachedCheckPermissions() {
+        if !hasScreenRecordingPermission {
             missingScreenRecordingPermission
         } else if appState.menuBarManager.isMenuBarHiddenBySystemUserDefaults {
             cannotArrange
@@ -26,6 +26,10 @@ struct MenuBarLayoutSettingsPane: View {
                 await warmLayoutCache()
             }
         }
+    }
+
+    private var hasScreenRecordingPermission: Bool {
+        appState.permissionsManager.screenRecordingPermission.hasPermission
     }
 
     @ViewBuilder
@@ -116,7 +120,7 @@ struct MenuBarLayoutSettingsPane: View {
         try? await Task.sleep(for: .milliseconds(100))
         isWarmingLayoutCache = true
         await appState.itemManager.warmLayoutCacheForSettings()
-        if ScreenCapture.cachedCheckPermissions(reset: true) {
+        if hasScreenRecordingPermission {
             await appState.imageCache.updateCache(sections: MenuBarSection.Name.allCases)
         }
         isWarmingLayoutCache = false

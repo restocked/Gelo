@@ -230,11 +230,12 @@ final class AppState: ObservableObject {
     /// Prewarms the menu bar layout cache after launch so the first Settings
     /// layout visit can usually render from cached item discovery.
     private func prewarmLayoutCacheAfterLaunch() {
-        Task.detached { [weak self] in
-            try? await Task.sleep(for: .milliseconds(750))
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
             guard
                 let self,
-                ScreenCapture.cachedCheckPermissions(reset: true)
+                !navigationState.isSettingsPresented,
+                permissionsManager.screenRecordingPermission.hasPermission
             else {
                 return
             }
