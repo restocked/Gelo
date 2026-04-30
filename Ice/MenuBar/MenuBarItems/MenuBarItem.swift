@@ -345,10 +345,13 @@ extension MenuBarItem {
 
         var seenWindowIDs = Set<CGWindowID>()
         var items = [MenuBarItem]()
+        let axBundleIdentifiers = Set(axMap.values.compactMap(\.bundleIdentifier))
         for windowID in windowIDs where boundsPredicate(windowID) {
             guard
                 let item = MenuBarItem(windowID: windowID, controlItemMap: controlItemMap, axMap: axMap),
                 titlePredicate(item),
+                !item.isNonvisualControlCenterWrapper(matchingAXBundleIdentifiers: axBundleIdentifiers),
+                !item.isTransientSystemStatusItemClone,
                 seenWindowIDs.insert(item.windowID).inserted
             else {
                 continue
@@ -357,6 +360,17 @@ extension MenuBarItem {
         }
 
         return items.sortedByOrderInMenuBar()
+    }
+}
+
+private extension MenuBarItem {
+    var isTransientSystemStatusItemClone: Bool {
+        info.namespace == .null &&
+        info.title == "System Status Item Clone"
+    }
+
+    func isNonvisualControlCenterWrapper(matchingAXBundleIdentifiers axBundleIdentifiers: Set<String>) -> Bool {
+        info.namespace == .controlCenter && axBundleIdentifiers.contains(info.title)
     }
 }
 

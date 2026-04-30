@@ -6,7 +6,7 @@
 import SwiftUI
 
 struct SettingsWindow: Scene {
-    @ObservedObject var appState: AppState
+    let appState: AppState
 
     var body: some Scene {
         Window(Constants.settingsWindowTitle, id: Constants.settingsWindowID) {

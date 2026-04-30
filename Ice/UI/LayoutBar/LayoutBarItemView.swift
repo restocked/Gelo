@@ -50,6 +50,9 @@ final class LayoutBarItemView: NSView {
         }
     }
 
+    /// The source image most recently rendered by this view.
+    private var imageSource: CGImage?
+
     /// A Boolean value that indicates whether the item view is a dragging placeholder.
     ///
     /// If this value is `true`, the item view does not draw its image.
@@ -90,21 +93,38 @@ final class LayoutBarItemView: NSView {
         var c = Set<AnyCancellable>()
 
         if let appState {
-            appState.imageCache.$windowImages
-                .combineLatest(appState.imageCache.$images)
-                .sink { [weak self] windowImages, images in
+            Publishers.CombineLatest3(
+                appState.imageCache.$windowImages,
+                appState.imageCache.$images,
+                appState.imageCache.$visualImagesRevision
+            )
+                .sink { [weak self] windowImages, images, _ in
                     guard
                         let self,
-                        let cgImage = windowImages[item.windowID] ?? (item.hasGenericIdentity ? nil : images[item.info])
+                        let cgImage = appState.imageCache.image(
+                            for: item,
+                            windowImages: windowImages,
+                            images: images
+                        )
                     else {
                         return
                     }
+                    imageSource = cgImage
                     image = NSImage(cgImage: cgImage, size: CGSize(width: cgImage.width, height: cgImage.height))
                 }
                 .store(in: &c)
         }
 
         cancellables = c
+    }
+
+    /// Returns the image currently rendered by the view for temporary visual
+    /// retention during menu bar item moves.
+    func visualImageSnapshot() -> (item: MenuBarItem, image: CGImage)? {
+        guard let imageSource else {
+            return nil
+        }
+        return (item, imageSource)
     }
 
     /// Provides an alert to display when the item view is disabled.
@@ -152,6 +172,16 @@ final class LayoutBarItemView: NSView {
 
     override func mouseDragged(with event: NSEvent) {
         super.mouseDragged(with: event)
+
+        if let container = superview as? LayoutBarContainer, container.isSettlingMove {
+            Logger.layoutBar.debug("Ignoring drag for \(item.logString) while layout is settling")
+            return
+        }
+
+        if appState?.itemManager.isMovingItem == true {
+            Logger.layoutBar.debug("Ignoring drag for \(item.logString) while another item is moving")
+            return
+        }
 
         guard isEnabled else {
             let alert = provideAlertForDisabledItem()

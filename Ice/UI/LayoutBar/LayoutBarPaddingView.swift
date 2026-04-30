@@ -8,6 +8,76 @@ import Combine
 
 /// A Cocoa view that manages the menu bar layout interface.
 final class LayoutBarPaddingView: NSView {
+    private struct VisibleLayoutSnapshot: Equatable {
+        struct Item: Equatable {
+            let windowID: CGWindowID
+            let info: MenuBarItemInfo
+            let ownerPID: pid_t
+            let frame: CGRect
+
+            init(_ item: MenuBarItem) {
+                self.windowID = item.windowID
+                self.info = item.info
+                self.ownerPID = item.ownerPID
+                self.frame = item.frame.integral
+            }
+        }
+
+        let items: [Item]
+
+        init(_ items: [MenuBarItem]) {
+            self.items = items.map(Item.init)
+        }
+    }
+
+    private struct ExpectedVisibleLayoutItem {
+        let windowID: CGWindowID
+        let info: MenuBarItemInfo
+        let ownerPID: pid_t
+        let hasGenericIdentity: Bool
+
+        init(_ item: MenuBarItem) {
+            self.windowID = item.windowID
+            self.info = item.info
+            self.ownerPID = item.ownerPID
+            self.hasGenericIdentity = item.hasGenericIdentity
+        }
+
+        var logString: String {
+            if hasGenericIdentity {
+                return "\(info)#\(windowID)|pid=\(ownerPID)"
+            }
+            return "\(info)|pid=\(ownerPID)"
+        }
+
+        func matches(_ item: MenuBarItem) -> Bool {
+            if hasGenericIdentity {
+                return item.windowID == windowID
+            }
+            return item.info == info && item.ownerPID == ownerPID
+        }
+    }
+
+    private struct VisualHealthMetrics {
+        let width: Int
+        let height: Int
+        let alphaCoverage: Double
+        let meanLuma: Double
+        let lumaStandardDeviation: Double
+
+        var logString: String {
+            "size=\(width)x\(height) " +
+            "alpha=\(String(format: "%.2f", alphaCoverage)) " +
+            "luma=\(String(format: "%.1f", meanLuma)) " +
+            "stdev=\(String(format: "%.1f", lumaStandardDeviation))"
+        }
+    }
+
+    private struct MovedItemMatch {
+        let item: MenuBarItem
+        let method: String
+    }
+
     private let container: LayoutBarContainer
 
     /// Window IDs for layout moves currently being applied from this layout bar.
@@ -26,6 +96,36 @@ final class LayoutBarPaddingView: NSView {
             return false
         }
         return Date.now < dragCooldownEndDate
+    }
+
+    /// The visible section is managed by Control Center on newer macOS
+    /// versions and often needs an extra beat to settle after a synthetic drag.
+    private var initialLayoutConvergenceDelay: Duration {
+        switch section.name {
+        case .visible: .milliseconds(700)
+        case .hidden, .alwaysHidden: .milliseconds(250)
+        }
+    }
+
+    private var layoutConvergenceRetryDelay: Duration {
+        switch section.name {
+        case .visible: .milliseconds(350)
+        case .hidden, .alwaysHidden: .milliseconds(200)
+        }
+    }
+
+    private var maxLayoutCorrections: Int {
+        switch section.name {
+        case .visible: 0
+        case .hidden, .alwaysHidden: 2
+        }
+    }
+
+    private var physicalMoveMaxAttempts: Int {
+        switch section.name {
+        case .visible: 1
+        case .hidden, .alwaysHidden: 2
+        }
     }
 
     /// Whether this layout bar accepts layout drag operations.
@@ -99,7 +199,7 @@ final class LayoutBarPaddingView: NSView {
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard allowsDragging, !isDragCoolingDown else {
+        guard allowsDragging, !isDragCoolingDown, !container.isSettlingMove else {
             return []
         }
         isDraggingItem = true
@@ -108,7 +208,7 @@ final class LayoutBarPaddingView: NSView {
     }
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
-        guard allowsDragging, !isDragCoolingDown else {
+        guard allowsDragging, !isDragCoolingDown, !container.isSettlingMove else {
             return
         }
         if let sender {
@@ -117,7 +217,7 @@ final class LayoutBarPaddingView: NSView {
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard allowsDragging, !isDragCoolingDown else {
+        guard allowsDragging, !isDragCoolingDown, !container.isSettlingMove else {
             return []
         }
         return container.updateArrangedViewsForDrag(with: sender, phase: .updated)
@@ -132,10 +232,11 @@ final class LayoutBarPaddingView: NSView {
             isDraggingItem = false
             container.canSetArrangedViews = true
         }
+        container.dragMoveIntent = nil
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard allowsDragging, !isDragCoolingDown else {
+        guard allowsDragging, !isDragCoolingDown, !container.isSettlingMove else {
             return false
         }
         guard let draggingSource = sender.draggingSource as? LayoutBarItemView else {
@@ -155,8 +256,15 @@ final class LayoutBarPaddingView: NSView {
             return false
         }
 
-        let desiredWindowIDs = arrangedViews.map(\.item.windowID)
-        move(draggingSource, to: destination, desiredWindowIDs: desiredWindowIDs)
+        let desiredViews = desiredArrangedViews(for: draggingSource)
+        let desiredWindowIDs = uniqueWindowIDs(from: desiredViews.map(\.item.windowID))
+        let expectedItems = desiredViews.map { ExpectedVisibleLayoutItem($0.item) }
+        move(
+            draggingSource,
+            to: destination,
+            desiredWindowIDs: desiredWindowIDs,
+            expectedItems: expectedItems
+        )
         return true
     }
 
@@ -164,6 +272,29 @@ final class LayoutBarPaddingView: NSView {
         for sourceView: LayoutBarItemView,
         at index: Int
     ) -> MenuBarItemManager.MoveDestination? {
+        if
+            section.name == .visible,
+            let intent = container.dragMoveIntent,
+            intent.sourceView === sourceView,
+            intent.destinationView.item.hasUsableMoveDestinationFrame
+        {
+            if intent.destinationIndex > intent.sourceIndex {
+                if
+                    let sourceIndex = intent.arrangedViews.firstIndex(of: sourceView),
+                    intent.arrangedViews.indices.contains(sourceIndex + 1),
+                    let targetItem = intent.arrangedViews[(sourceIndex + 1)...]
+                        .first(where: { isUsableMoveTarget($0.item) })?
+                        .item
+                {
+                    return .leftOfItem(targetItem)
+                }
+                return .rightOfItem(intent.destinationView.item)
+            }
+            if intent.destinationIndex < intent.sourceIndex {
+                return .leftOfItem(intent.destinationView.item)
+            }
+        }
+
         if arrangedViews.count == 1 {
             // dragging source is the only view in the layout bar, so we
             // need to find a target item
@@ -177,13 +308,13 @@ final class LayoutBarPaddingView: NSView {
         }
 
         if arrangedViews.indices.contains(index + 1),
-            let targetItem = arrangedViews[(index + 1)...].first(where: { $0.item.hasMoveDestinationFrame })?.item
+            let targetItem = arrangedViews[(index + 1)...].first(where: { isUsableMoveTarget($0.item) })?.item
         {
             return .leftOfItem(targetItem)
         }
 
         if arrangedViews.indices.contains(index - 1),
-            let targetItem = arrangedViews[..<index].last(where: { $0.item.hasMoveDestinationFrame })?.item
+            let targetItem = arrangedViews[..<index].last(where: { isUsableMoveTarget($0.item) })?.item
         {
             return .rightOfItem(targetItem)
         }
@@ -195,6 +326,61 @@ final class LayoutBarPaddingView: NSView {
 
         Logger.layoutBar.debug("No usable adjacent target for \(sourceView.item.logString)")
         return nil
+    }
+
+    private func desiredArrangedViews(for sourceView: LayoutBarItemView) -> [LayoutBarItemView] {
+        guard
+            section.name == .visible,
+            let intent = container.dragMoveIntent,
+            intent.sourceView === sourceView
+        else {
+            return arrangedViews
+        }
+
+        return intent.arrangedViews
+    }
+
+    private func isUsableMoveTarget(_ item: MenuBarItem) -> Bool {
+        switch section.name {
+        case .visible:
+            item.hasUsableMoveDestinationFrame
+        case .hidden, .alwaysHidden:
+            item.hasMoveDestinationFrame
+        }
+    }
+
+    private func isUsableCorrectionTarget(_ item: MenuBarItem) -> Bool {
+        guard isUsableMoveTarget(item) else {
+            return false
+        }
+
+        // Visible-section correction should not use Gelo's own boundary items
+        // as normal anchors; they can be transient while sections are being
+        // shown or hidden. Direct drops can still use them when needed.
+        if section.name == .visible, item.info.namespace == .ice {
+            return false
+        }
+
+        return true
+    }
+
+    private func isUsableCorrectionSource(_ item: MenuBarItem) -> Bool {
+        guard item.isMovable, isUsableMoveTarget(item) else {
+            return false
+        }
+
+        // Gelo's own section boundary/control items are anchors for the layout
+        // algorithm, not user items that correction should shuffle around.
+        if section.name == .visible, item.info.namespace == .ice {
+            return false
+        }
+
+        return true
+    }
+
+    private func uniqueWindowIDs(from windowIDs: [CGWindowID]) -> [CGWindowID] {
+        var seen = Set<CGWindowID>()
+        return windowIDs.filter { seen.insert($0).inserted }
     }
 
     private func currentMenuBarItems() -> [MenuBarItem] {
@@ -253,7 +439,8 @@ final class LayoutBarPaddingView: NSView {
     private func move(
         _ sourceView: LayoutBarItemView,
         to destination: MenuBarItemManager.MoveDestination,
-        desiredWindowIDs: [CGWindowID]
+        desiredWindowIDs: [CGWindowID],
+        expectedItems: [ExpectedVisibleLayoutItem]
     ) {
         guard let appState = container.appState else {
             return
@@ -277,7 +464,21 @@ final class LayoutBarPaddingView: NSView {
         }
 
         movingWindowIDs.insert(item.windowID)
+        var preMoveImage: CGImage?
+        if section.name == .visible {
+            let debugWindowIDs = uniqueWindowIDs(from: [item.windowID, targetItem.windowID])
+            appState.imageCache.setLayoutDebugWindowIDs(debugWindowIDs)
+            Logger.layoutBar.debug(
+                "Visible move debug source=\(item.logString) target=\(targetItem.logString) expected=\(expectedItems.map(\.logString).joined(separator: " | "))"
+            )
+            let visualSnapshots = container.freezeCurrentImages()
+            preMoveImage = visualSnapshots.first { $0.item.windowID == item.windowID }?.image
+            appState.imageCache.retainVisualImages(visualSnapshots)
+        }
         container.canSetArrangedViews = false
+        if section.name == .visible {
+            container.isSettlingMove = true
+        }
         sourceView.oldContainerInfo?.container.canSetArrangedViews = false
 
         Task { @MainActor in
@@ -291,40 +492,316 @@ final class LayoutBarPaddingView: NSView {
                 if let oldContainer = sourceView.oldContainerInfo?.container {
                     oldContainer.setArrangedViews(items: appState.itemManager.itemCache.managedItems(for: oldContainer.section.name))
                 }
+                self.container.isSettlingMove = false
                 sourceView.oldContainerInfo = nil
+                appState.imageCache.clearLayoutDebugWindowIDs()
             }
             do {
+                if self.section.name == .visible {
+                    Logger.layoutBar.debug("Applying direct visible move for dragged item \(item.logString)")
+                    do {
+                        try await appState.itemManager.moveVisibleItem(
+                            item: item,
+                            to: destination,
+                            maxAttempts: self.physicalMoveMaxAttempts,
+                            wakeUpOnFailure: false
+                        )
+                    } catch {
+                        Logger.layoutBar.info(
+                            "Visible direct move reported an event error; waiting for menu bar state: \(error)"
+                        )
+                    }
+                    try? await Task.sleep(for: .milliseconds(150))
+                    await appState.itemManager.cacheItemsRegardless()
+                    Logger.layoutBar.debug("Visible direct move completed; using actual menu bar order")
+                    await self.refreshImagesAfterMove(appState: appState, expectedItems: expectedItems)
+                    self.logPostMoveHealth(
+                        appState: appState,
+                        originalItem: item,
+                        preMoveImage: preMoveImage,
+                        desiredWindowIDs: desiredWindowIDs
+                    )
+                    return
+                }
+
                 try await appState.itemManager.move(
                     item: item,
                     to: destination,
-                    maxAttempts: 2,
+                    maxAttempts: self.physicalMoveMaxAttempts,
                     wakeUpOnFailure: false
                 )
                 appState.itemManager.removeTempShownItemFromCache(with: item)
                 let didConverge = await self.convergeLayoutOrder(
                     appState: appState,
                     desiredWindowIDs: desiredWindowIDs,
-                    maxCorrections: 2
+                    maxCorrections: self.maxLayoutCorrections
                 )
                 if !didConverge {
-                    Logger.layoutBar.warning("Layout move did not converge for \(item.logString)")
+                    if self.section.name == .visible {
+                        Logger.layoutBar.info(
+                            "Visible layout move did not converge immediately for \(item.logString); using actual menu bar order"
+                        )
+                    } else {
+                        Logger.layoutBar.warning("Layout move did not converge for \(item.logString)")
+                    }
                 }
-                await appState.imageCache.updateCacheWithoutChecks(sections: MenuBarSection.Name.allCases)
+                await self.refreshImagesAfterMove(appState: appState, expectedItems: expectedItems)
             } catch {
+                if self.section.name == .visible {
+                    Logger.layoutBar.info("Visible layout move reported an event error: \(error)")
+                    await self.refreshImagesAfterMove(appState: appState, expectedItems: expectedItems)
+                    return
+                }
+
                 let didConverge = await self.convergeLayoutOrder(
                     appState: appState,
                     desiredWindowIDs: desiredWindowIDs,
-                    maxCorrections: 2
+                    maxCorrections: self.maxLayoutCorrections
                 )
                 if didConverge {
                     Logger.layoutBar.info("Layout move converged despite move error: \(error)")
+                } else if self.section.name == .visible {
+                    Logger.layoutBar.info(
+                        "Visible layout move reported an event error before convergence; using actual menu bar order: \(error)"
+                    )
                 } else {
                     Logger.layoutBar.error("Error moving menu bar item: \(error)")
                     self.restoreOriginalPosition(of: sourceView)
                 }
-                await appState.imageCache.updateCacheWithoutChecks(sections: MenuBarSection.Name.allCases)
+                await self.refreshImagesAfterMove(appState: appState, expectedItems: expectedItems)
             }
         }
+    }
+
+    private func logPostMoveHealth(
+        appState: AppState,
+        originalItem: MenuBarItem,
+        preMoveImage: CGImage?,
+        desiredWindowIDs: [CGWindowID]
+    ) {
+        guard section.name == .visible else {
+            return
+        }
+
+        guard
+            let match = movedItemMatch(
+                appState: appState,
+                originalItem: originalItem,
+                desiredWindowIDs: desiredWindowIDs
+            )
+        else {
+            Logger.layoutBar.info(
+                "Post-move health source=\(originalItem.logString) status=missing match=none"
+            )
+            return
+        }
+
+        let postImage = appState.imageCache.windowImages[match.item.windowID] ??
+            (!match.item.hasGenericIdentity ? appState.imageCache.images[match.item.info] : nil)
+        guard let postImage else {
+            Logger.layoutBar.info(
+                "Post-move health source=\(originalItem.logString) matched=\(match.item.logString) match=\(match.method) status=missing-image"
+            )
+            return
+        }
+
+        let preMetrics = preMoveImage.flatMap(visualHealthMetrics)
+        guard let postMetrics = visualHealthMetrics(for: postImage) else {
+            Logger.layoutBar.info(
+                "Post-move health source=\(originalItem.logString) matched=\(match.item.logString) match=\(match.method) status=unreadable-image"
+            )
+            return
+        }
+
+        let status = postMoveHealthStatus(preMetrics: preMetrics, postMetrics: postMetrics)
+        let preLog = preMetrics.map { " pre=[\($0.logString)]" } ?? " pre=missing"
+        Logger.layoutBar.info(
+            "Post-move health source=\(originalItem.logString) matched=\(match.item.logString) match=\(match.method) status=\(status) post=[\(postMetrics.logString)]\(preLog)"
+        )
+    }
+
+    private func movedItemMatch(
+        appState: AppState,
+        originalItem: MenuBarItem,
+        desiredWindowIDs: [CGWindowID]
+    ) -> MovedItemMatch? {
+        let visibleItems = appState.itemManager.itemCache.managedItems(for: .visible)
+        if let exact = visibleItems.first(where: { $0.windowID == originalItem.windowID }) {
+            return MovedItemMatch(item: exact, method: "windowID")
+        }
+
+        if !originalItem.hasGenericIdentity,
+            let stable = visibleItems.first(where: {
+                $0.info == originalItem.info && $0.ownerPID == originalItem.ownerPID
+            })
+        {
+            return MovedItemMatch(item: stable, method: "stable-info")
+        }
+
+        let genericCandidates = visibleItems.filter {
+            $0.info == originalItem.info &&
+            $0.ownerPID == originalItem.ownerPID &&
+            abs($0.frame.width - originalItem.frame.width) <= 8
+        }
+        if genericCandidates.count == 1, let candidate = genericCandidates.first {
+            return MovedItemMatch(item: candidate, method: "generic-size")
+        }
+
+        let actualWindowIDs = visibleItems.map(\.windowID)
+        let relevantItems = visibleItems.filter { desiredWindowIDs.contains($0.windowID) }
+        let relevantDesiredWindowIDs = desiredWindowIDs.filter { actualWindowIDs.contains($0) }
+        if
+            let desiredIndex = relevantDesiredWindowIDs.firstIndex(of: originalItem.windowID),
+            relevantItems.indices.contains(desiredIndex)
+        {
+            return MovedItemMatch(
+                item: relevantItems[desiredIndex],
+                method: "expected-index candidates=\(genericCandidates.count)"
+            )
+        }
+
+        return nil
+    }
+
+    private func postMoveHealthStatus(
+        preMetrics: VisualHealthMetrics?,
+        postMetrics: VisualHealthMetrics
+    ) -> String {
+        if let preMetrics, preMetrics.alphaCoverage > 0.03 {
+            let alphaRatio = postMetrics.alphaCoverage / preMetrics.alphaCoverage
+            if alphaRatio < 0.35 {
+                return "blank-alpha-drop"
+            }
+            if alphaRatio < 0.70 {
+                return "degraded-alpha"
+            }
+        } else if postMetrics.alphaCoverage < 0.02 {
+            return "blank-alpha"
+        }
+
+        // Menu bar template images are often pure black alpha masks, so luma
+        // variance is only useful for non-template images.
+        if
+            let preMetrics,
+            preMetrics.lumaStandardDeviation > 4,
+            postMetrics.lumaStandardDeviation < preMetrics.lumaStandardDeviation * 0.35
+        {
+            return "degraded-detail"
+        }
+        return "healthy"
+    }
+
+    private func visualHealthMetrics(for image: CGImage) -> VisualHealthMetrics? {
+        let width = 32
+        let height = 32
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue |
+            CGBitmapInfo.byteOrder32Big.rawValue
+
+        let didDraw = pixels.withUnsafeMutableBytes { bytes -> Bool in
+            guard
+                let context = CGContext(
+                    data: bytes.baseAddress,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: width * 4,
+                    space: colorSpace,
+                    bitmapInfo: bitmapInfo
+                )
+            else {
+                return false
+            }
+            context.interpolationQuality = .medium
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard didDraw else {
+            return nil
+        }
+
+        var lumas = [Double]()
+        lumas.reserveCapacity(width * height)
+        var visiblePixelCount = 0
+        for index in stride(from: 0, to: pixels.count, by: 4) {
+            let alpha = Double(pixels[index + 3]) / 255
+            guard alpha > 0.03 else {
+                continue
+            }
+            visiblePixelCount += 1
+            let red = Double(pixels[index])
+            let green = Double(pixels[index + 1])
+            let blue = Double(pixels[index + 2])
+            lumas.append((0.2126 * red) + (0.7152 * green) + (0.0722 * blue))
+        }
+
+        guard !lumas.isEmpty else {
+            return VisualHealthMetrics(
+                width: image.width,
+                height: image.height,
+                alphaCoverage: 0,
+                meanLuma: 0,
+                lumaStandardDeviation: 0
+            )
+        }
+
+        let mean = lumas.reduce(0, +) / Double(lumas.count)
+        let variance = lumas.reduce(0) { partialResult, luma in
+            let difference = luma - mean
+            return partialResult + (difference * difference)
+        } / Double(lumas.count)
+
+        return VisualHealthMetrics(
+            width: image.width,
+            height: image.height,
+            alphaCoverage: Double(visiblePixelCount) / Double(width * height),
+            meanLuma: mean,
+            lumaStandardDeviation: sqrt(variance)
+        )
+    }
+
+    private func refreshImagesAfterMove(
+        appState: AppState,
+        expectedItems: [ExpectedVisibleLayoutItem]
+    ) async {
+        if section.name != .visible {
+            await appState.imageCache.updateCacheWithoutChecks(sections: MenuBarSection.Name.allCases)
+            try? await Task.sleep(for: .milliseconds(700))
+            await appState.itemManager.cacheItemsRegardless()
+        } else {
+            await waitForVisibleLayoutToSettle(appState: appState, expectedItems: expectedItems)
+        }
+        await appState.imageCache.updateCacheWithoutChecks(sections: MenuBarSection.Name.allCases)
+    }
+
+    private func waitForVisibleLayoutToSettle(
+        appState: AppState,
+        expectedItems: [ExpectedVisibleLayoutItem]
+    ) async {
+        let startDate = Date.now
+        var previousSnapshot: VisibleLayoutSnapshot?
+
+        for _ in 0..<10 {
+            try? await Task.sleep(for: .milliseconds(35))
+            await appState.itemManager.cacheItemsRegardless()
+
+            let visibleItems = appState.itemManager.itemCache.managedItems(for: .visible)
+            let snapshot = VisibleLayoutSnapshot(visibleItems)
+            let expectedItemsArePresent = expectedItems.allSatisfy { expectedItem in
+                visibleItems.contains { expectedItem.matches($0) }
+            }
+
+            if expectedItemsArePresent, snapshot == previousSnapshot {
+                let elapsedMilliseconds = Int(Date.now.timeIntervalSince(startDate) * 1000)
+                Logger.layoutBar.debug("Visible layout settled after \(elapsedMilliseconds)ms")
+                return
+            }
+
+            previousSnapshot = snapshot
+        }
+
+        Logger.layoutBar.debug("Visible layout settle wait timed out; refreshing images with latest cache")
     }
 
     private func convergeLayoutOrder(
@@ -332,7 +809,7 @@ final class LayoutBarPaddingView: NSView {
         desiredWindowIDs: [CGWindowID],
         maxCorrections: Int
     ) async -> Bool {
-        try? await Task.sleep(for: .milliseconds(250))
+        try? await Task.sleep(for: initialLayoutConvergenceDelay)
         await appState.itemManager.cacheItemsRegardless()
 
         for attempt in 0...maxCorrections {
@@ -346,7 +823,7 @@ final class LayoutBarPaddingView: NSView {
                     Logger.layoutBar.warning("Some desired items are missing after layout move in \(section.name.logString)")
                     return false
                 }
-                try? await Task.sleep(for: .milliseconds(200))
+                try? await Task.sleep(for: layoutConvergenceRetryDelay)
                 await appState.itemManager.cacheItemsRegardless()
                 continue
             }
@@ -385,7 +862,7 @@ final class LayoutBarPaddingView: NSView {
                 Logger.layoutBar.debug("Layout correction reported an event error: \(error)")
             }
 
-            try? await Task.sleep(for: .milliseconds(200))
+            try? await Task.sleep(for: layoutConvergenceRetryDelay)
             await appState.itemManager.cacheItemsRegardless()
         }
 
@@ -397,39 +874,43 @@ final class LayoutBarPaddingView: NSView {
         desiredWindowIDs: [CGWindowID],
         actualWindowIDs: [CGWindowID]
     ) -> (item: MenuBarItem, destination: MenuBarItemManager.MoveDestination)? {
-        guard let mismatchIndex = desiredWindowIDs.indices.first(where: { index in
+        let mismatchIndices = desiredWindowIDs.indices.filter { index in
             actualWindowIDs.indices.contains(index) &&
             actualWindowIDs[index] != desiredWindowIDs[index]
-        }) else {
-            return nil
         }
 
-        let itemWindowID = desiredWindowIDs[mismatchIndex]
-        guard let item = actualItems.first(where: { $0.windowID == itemWindowID }) else {
-            return nil
-        }
+        for mismatchIndex in mismatchIndices {
+            let itemWindowID = desiredWindowIDs[mismatchIndex]
+            guard
+                let item = actualItems.first(where: { $0.windowID == itemWindowID }),
+                isUsableCorrectionSource(item)
+            else {
+                continue
+            }
 
-        if
-            desiredWindowIDs.indices.contains(mismatchIndex + 1),
-            let targetItem = actualItems.first(where: { $0.windowID == desiredWindowIDs[mismatchIndex + 1] }),
-            targetItem.windowID != item.windowID
-        {
-            return (item, .leftOfItem(targetItem))
-        }
+            if
+                desiredWindowIDs.indices.contains(mismatchIndex + 1),
+                let targetItem = actualItems.first(where: {
+                    $0.windowID == desiredWindowIDs[mismatchIndex + 1] &&
+                    isUsableCorrectionTarget($0)
+                }),
+                targetItem.windowID != item.windowID
+            {
+                return (item, .leftOfItem(targetItem))
+            }
 
-        if
-            desiredWindowIDs.indices.contains(mismatchIndex - 1),
-            let targetItem = actualItems.first(where: { $0.windowID == desiredWindowIDs[mismatchIndex - 1] }),
-            targetItem.windowID != item.windowID
-        {
-            return (item, .rightOfItem(targetItem))
+            if
+                desiredWindowIDs.indices.contains(mismatchIndex - 1),
+                let targetItem = actualItems.first(where: {
+                    $0.windowID == desiredWindowIDs[mismatchIndex - 1] &&
+                    isUsableCorrectionTarget($0)
+                }),
+                targetItem.windowID != item.windowID
+            {
+                return (item, .rightOfItem(targetItem))
+            }
         }
 
         return nil
     }
-}
-
-// MARK: - Logger
-private extension Logger {
-    static let layoutBar = Logger(category: "LayoutBar")
 }
