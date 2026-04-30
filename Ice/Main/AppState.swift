@@ -145,7 +145,7 @@ final class AppState: ObservableObject {
                 }
                 await self.itemManager.warmLayoutCacheForSettings()
                 if ScreenCapture.cachedCheckPermissions(reset: true) {
-                    await self.imageCache.updateCache(sections: MenuBarSection.Name.allCases)
+                    await self.imageCache.updateCacheCoalesced(sections: MenuBarSection.Name.allCases)
                 }
             }
         }

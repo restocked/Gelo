@@ -102,7 +102,7 @@ final class MenuBarSearchPanel: NSPanel {
         appState.navigationState.isSearchPresented = true
 
         if ScreenCapture.cachedCheckPermissions() {
-            await appState.imageCache.updateCache()
+            await appState.imageCache.updateCacheCoalesced()
         }
 
         let hostingView = MenuBarSearchHostingView(appState: appState, panel: self)

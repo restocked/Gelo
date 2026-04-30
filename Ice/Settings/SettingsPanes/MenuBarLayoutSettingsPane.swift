@@ -117,12 +117,24 @@ struct MenuBarLayoutSettingsPane: View {
     private func warmLayoutCache() async {
         // Let SwiftUI finish presenting the pane before doing AX/window-list
         // discovery and image capture for the layout bars.
-        try? await Task.sleep(for: .milliseconds(100))
-        isWarmingLayoutCache = true
-        await appState.itemManager.warmLayoutCacheForSettings()
-        if hasScreenRecordingPermission {
-            await appState.imageCache.updateCache(sections: MenuBarSection.Name.allCases)
+        do {
+            try await Task.sleep(for: .milliseconds(100))
+        } catch {
+            return
         }
-        isWarmingLayoutCache = false
+
+        isWarmingLayoutCache = true
+        defer {
+            isWarmingLayoutCache = false
+        }
+
+        await appState.itemManager.warmLayoutCacheForSettings()
+        guard !Task.isCancelled else {
+            return
+        }
+
+        if hasScreenRecordingPermission {
+            await appState.imageCache.updateCacheCoalesced(sections: MenuBarSection.Name.allCases)
+        }
     }
 }

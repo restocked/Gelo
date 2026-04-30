@@ -8,6 +8,12 @@ import Combine
 
 /// Cache for menu bar item images.
 final class MenuBarItemImageCache: ObservableObject {
+    /// A cache refresh request that can be compared with an in-flight request.
+    private enum UpdateCacheRequest: Equatable {
+        case automatic
+        case sections(Set<MenuBarSection.Name>)
+    }
+
     /// Captured menu bar item images keyed by both stable item identity and
     /// current window identity.
     private struct CapturedImages {
@@ -36,6 +42,15 @@ final class MenuBarItemImageCache: ObservableObject {
 
     /// Storage for internal observers.
     private var cancellables = Set<AnyCancellable>()
+
+    /// The current cache refresh task, if one is already in progress.
+    private var updateCacheTask: Task<Void, Never>?
+
+    /// Identifier for the current cache refresh task.
+    private var updateCacheTaskID: UUID?
+
+    /// The request represented by the current cache refresh task.
+    private var updateCacheTaskRequest: UpdateCacheRequest?
 
     /// Creates a cache with the given app state.
     init(appState: AppState) {
@@ -78,7 +93,7 @@ final class MenuBarItemImageCache: ObservableObject {
                 }
                 Task {
                     if ScreenCapture.cachedCheckPermissions() {
-                        await self.updateCache()
+                        await self.updateCacheCoalesced()
                     }
                 }
             }
@@ -112,7 +127,7 @@ final class MenuBarItemImageCache: ObservableObject {
             (isAppFrontmost && isSettingsPresented && settingsNavigationIdentifier == .menuBarLayout)
         }
         .removeDuplicates()
-        .flatMap { shouldRefresh -> AnyPublisher<Void, Never> in
+        .map { shouldRefresh -> AnyPublisher<Void, Never> in
             guard shouldRefresh else {
                 return Empty().eraseToAnyPublisher()
             }
@@ -121,6 +136,7 @@ final class MenuBarItemImageCache: ObservableObject {
                 .merge(with: Timer.publish(every: 3, on: .main, in: .default).autoconnect().mapToVoid())
                 .eraseToAnyPublisher()
         }
+        .switchToLatest()
         .eraseToAnyPublisher()
     }
 
@@ -325,6 +341,43 @@ final class MenuBarItemImageCache: ObservableObject {
             windowImages.merge(newWindowImages) { (_, new) in new }
             self.screen = NSScreen.main
             self.menuBarHeight = menuBarHeight
+        }
+    }
+
+    /// Updates the cache while reusing any compatible refresh that is already in progress.
+    @MainActor
+    func updateCacheCoalesced(sections: [MenuBarSection.Name]? = nil) async {
+        let request = sections.map { UpdateCacheRequest.sections(Set($0)) } ?? .automatic
+
+        while let updateCacheTask {
+            let inFlightRequest = updateCacheTaskRequest
+            await updateCacheTask.value
+            if inFlightRequest == request {
+                return
+            }
+        }
+
+        let taskID = UUID()
+        let task = Task { [weak self] in
+            guard let self else {
+                return
+            }
+            if let sections {
+                await self.updateCache(sections: sections)
+            } else {
+                await self.updateCache()
+            }
+        }
+
+        updateCacheTaskID = taskID
+        updateCacheTaskRequest = request
+        updateCacheTask = task
+        await task.value
+
+        if updateCacheTaskID == taskID {
+            updateCacheTask = nil
+            updateCacheTaskID = nil
+            updateCacheTaskRequest = nil
         }
     }
 

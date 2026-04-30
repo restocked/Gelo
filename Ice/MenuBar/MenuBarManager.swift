@@ -251,7 +251,7 @@ final class MenuBarManager: ObservableObject {
             isAppFrontmost && isSettingsPresented && settingsNavigationIdentifier == .menuBarLayout
         }
         .removeDuplicates()
-        .flatMap { shouldRefresh -> AnyPublisher<Void, Never> in
+        .map { shouldRefresh -> AnyPublisher<Void, Never> in
             guard shouldRefresh else {
                 return Empty().eraseToAnyPublisher()
             }
@@ -260,6 +260,7 @@ final class MenuBarManager: ObservableObject {
                 .merge(with: Timer.publish(every: 5, on: .main, in: .default).autoconnect().mapToVoid())
                 .eraseToAnyPublisher()
         }
+        .switchToLatest()
         .eraseToAnyPublisher()
     }
 

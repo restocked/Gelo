@@ -69,7 +69,7 @@ final class IceBarColorManager: ObservableObject {
                     .mapToVoid(),
                 iceBarPanel.publisher(for: \.isVisible)
                     .removeDuplicates()
-                    .flatMap { isVisible -> AnyPublisher<Void, Never> in
+                    .map { isVisible -> AnyPublisher<Void, Never> in
                         guard isVisible else {
                             return Empty().eraseToAnyPublisher()
                         }
@@ -77,6 +77,7 @@ final class IceBarColorManager: ObservableObject {
                             .merge(with: Timer.publish(every: 5, on: .main, in: .default).autoconnect().mapToVoid())
                             .eraseToAnyPublisher()
                     }
+                    .switchToLatest()
             )
             .receive(on: DispatchQueue.main)
             .sink { [weak self, weak iceBarPanel] in
