@@ -243,10 +243,6 @@ final class LayoutBarContainer: NSView {
         arrangedViews = newViews
     }
 
-    func freezeCurrentImages() -> [(item: MenuBarItem, image: CGImage)] {
-        arrangedViews.compactMap { $0.visualImageSnapshot() }
-    }
-
     /// Updates the positions of the container's arranged views using the
     /// specified dragging information and phase.
     ///

@@ -15,19 +15,6 @@ final class MenuBarItemImageCache: ObservableObject {
         var imagesByWindowID = [CGWindowID: CGImage]()
     }
 
-    /// A key for the last good image rendered for a layout item.
-    private enum VisualImageKey: Hashable {
-        case identified(info: MenuBarItemInfo, ownerPID: pid_t)
-        case generic(info: MenuBarItemInfo, ownerPID: pid_t, widthBucket: Int, heightBucket: Int)
-    }
-
-    /// A recently captured image that can be reused while macOS recreates a
-    /// status item window after a move.
-    private struct RetainedVisualImage {
-        let image: CGImage
-        let capturedAt: Date
-    }
-
     /// The cached item images.
     @Published private(set) var images = [MenuBarItemInfo: CGImage]()
 
@@ -37,10 +24,6 @@ final class MenuBarItemImageCache: ObservableObject {
     /// identity, so UI rendering must prefer this cache to avoid reusing one
     /// captured image for several distinct windows.
     @Published private(set) var windowImages = [CGWindowID: CGImage]()
-
-    /// A monotonically increasing value that notifies views when visual fallback
-    /// images are updated.
-    @Published private(set) var visualImagesRevision = 0
 
     /// The screen of the cached item images.
     private(set) var screen: NSScreen?
@@ -53,15 +36,6 @@ final class MenuBarItemImageCache: ObservableObject {
 
     /// Storage for internal observers.
     private var cancellables = Set<AnyCancellable>()
-
-    /// Recently captured images keyed by stable visual identity.
-    private var visualImages = [VisualImageKey: RetainedVisualImage]()
-
-    /// Runtime window IDs to include in short-lived layout debug logs.
-    private var layoutDebugWindowIDs = Set<CGWindowID>()
-
-    /// The amount of time to retain visual fallbacks for recreated item windows.
-    private let visualImageRetentionInterval: TimeInterval = 10
 
     /// Creates a cache with the given app state.
     init(appState: AppState) {
@@ -117,7 +91,7 @@ final class MenuBarItemImageCache: ObservableObject {
     /// Logs a reason for skipping the cache.
     private func logSkippingCache(reason _: String) {
         // Normal state changes can trigger many skipped refreshes. Keep this
-        // quiet so targeted identity diagnostics remain readable.
+        // quiet so layout debugging remains readable.
     }
 
     /// Returns the best currently available image for a menu bar item.
@@ -127,58 +101,12 @@ final class MenuBarItemImageCache: ObservableObject {
         images: [MenuBarItemInfo: CGImage]
     ) -> CGImage? {
         if let image = windowImages[item.windowID] {
-            logImageLookup(item: item, source: "windowID", image: image)
             return image
         }
         if !item.hasGenericIdentity, let image = images[item.info] {
-            logImageLookup(item: item, source: "stable info", image: image)
             return image
         }
-        guard
-            let visualImageKey = visualImageKey(for: item),
-            let retainedImage = visualImages[visualImageKey]
-        else {
-            return nil
-        }
-        return retainedImage.image
-    }
-
-    /// Retains images that are already rendered in the layout UI. This keeps
-    /// third-party status items visible while macOS recreates their backing
-    /// windows during a menu bar reorder.
-    func retainVisualImages(_ snapshots: [(item: MenuBarItem, image: CGImage)]) {
-        guard !snapshots.isEmpty else {
-            return
-        }
-
-        let now = Date()
-        var didUpdate = false
-        for snapshot in snapshots {
-            guard
-                snapshot.image.width > 0,
-                snapshot.image.height > 0,
-                let key = visualImageKey(for: snapshot.item)
-            else {
-                continue
-            }
-            visualImages[key] = RetainedVisualImage(
-                image: snapshot.image,
-                capturedAt: now
-            )
-            didUpdate = true
-        }
-
-        if didUpdate {
-            visualImagesRevision += 1
-        }
-    }
-
-    func setLayoutDebugWindowIDs(_ windowIDs: [CGWindowID]) {
-        layoutDebugWindowIDs = Set(windowIDs)
-    }
-
-    func clearLayoutDebugWindowIDs() {
-        layoutDebugWindowIDs.removeAll()
+        return nil
     }
 
     /// Returns a Boolean value that indicates whether caching menu bar items failed for
@@ -275,7 +203,7 @@ final class MenuBarItemImageCache: ObservableObject {
                 capturedImages.imagesByWindowID[windowID] = itemImage
             }
         } else {
-            Logger.imageCache.warning("Composite image capture failed. Attempting to capturing items individually.")
+            Logger.imageCache.warning("Composite image capture failed. Attempting to capture items individually.")
 
             for windowID in windowIDs {
                 guard
@@ -352,7 +280,7 @@ final class MenuBarItemImageCache: ObservableObject {
         let allValidWindowIDs = Set(allItems.map(\.windowID))
 
         let menuBarHeight = screen.getMenuBarHeight()
-        await MainActor.run { [newImages, newWindowImages, allItems, allValidInfos, allValidWindowIDs] in
+        await MainActor.run { [newImages, newWindowImages, allValidInfos, allValidWindowIDs] in
             // Remove images for items that no longer exist in the item cache
             images = images.filter { allValidInfos.contains($0.key) }
             windowImages = windowImages.filter { allValidWindowIDs.contains($0.key) }
@@ -361,7 +289,6 @@ final class MenuBarItemImageCache: ObservableObject {
             windowImages.merge(newWindowImages) { (_, new) in new }
             self.screen = NSScreen.main
             self.menuBarHeight = menuBarHeight
-            updateVisualImages(for: allItems)
         }
     }
 
@@ -423,89 +350,6 @@ final class MenuBarItemImageCache: ObservableObject {
         }
 
         await updateCache(sections: sectionsNeedingDisplay)
-    }
-}
-
-// MARK: - Visual Image Retention
-
-private extension MenuBarItemImageCache {
-    private func visualImageKey(for item: MenuBarItem) -> VisualImageKey? {
-        guard item.hasGenericIdentity else {
-            return .identified(info: item.info, ownerPID: item.ownerPID)
-        }
-
-        guard item.frame.width > 0, item.frame.height > 0 else {
-            return nil
-        }
-
-        return .generic(
-            info: item.info,
-            ownerPID: item.ownerPID,
-            widthBucket: Int((item.frame.width / 4).rounded()),
-            heightBucket: Int((item.frame.height / 4).rounded())
-        )
-    }
-
-    func visualImageKeyDescription(for item: MenuBarItem) -> String {
-        switch visualImageKey(for: item) {
-        case .identified(let info, let ownerPID):
-            return "\(info)|pid=\(ownerPID)"
-        case .generic(let info, let ownerPID, let widthBucket, let heightBucket):
-            return "\(info)|pid=\(ownerPID)|w=\(widthBucket)|h=\(heightBucket)"
-        case nil:
-            return "\(item.info)|pid=\(item.ownerPID)|unkeyed"
-        }
-    }
-
-    func logImageLookup(item _: MenuBarItem, source _: String, image _: CGImage) {
-        // Cache hits are intentionally quiet. Post-move health diagnostics in
-        // LayoutBarPaddingView now report the moved item's actual render state.
-    }
-
-    func updateVisualImages(for items: [MenuBarItem]) {
-        let now = Date()
-        let validInterval = now.addingTimeInterval(-visualImageRetentionInterval)
-        visualImages = visualImages.filter { _, retainedImage in
-            retainedImage.capturedAt >= validInterval
-        }
-
-        var didUpdate = false
-        for item in items {
-            guard
-                let image = windowImages[item.windowID] ?? (!item.hasGenericIdentity ? images[item.info] : nil),
-                image.width > 0,
-                image.height > 0,
-                let key = visualImageKey(for: item)
-            else {
-                continue
-            }
-
-            visualImages[key] = RetainedVisualImage(
-                image: image,
-                capturedAt: now
-            )
-            didUpdate = true
-        }
-
-        if didUpdate {
-            visualImagesRevision += 1
-        }
-    }
-
-    func shouldLogIdentityDebug(for item: MenuBarItem) -> Bool {
-        if layoutDebugWindowIDs.contains(item.windowID) {
-            return true
-        }
-
-        let values = [
-            item.logString,
-            item.title ?? "",
-            item.ownerName ?? "",
-            item.owningApplication?.bundleIdentifier ?? "",
-            item.owningApplication?.localizedName ?? "",
-        ].joined(separator: " ").lowercased()
-
-        return ["stats", "ram", "mini", "exelban"].contains { values.contains($0) }
     }
 }
 

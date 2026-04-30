@@ -43,39 +43,12 @@ final class LayoutBarPaddingView: NSView {
             self.hasGenericIdentity = item.hasGenericIdentity
         }
 
-        var logString: String {
-            if hasGenericIdentity {
-                return "\(info)#\(windowID)|pid=\(ownerPID)"
-            }
-            return "\(info)|pid=\(ownerPID)"
-        }
-
         func matches(_ item: MenuBarItem) -> Bool {
             if hasGenericIdentity {
                 return item.windowID == windowID
             }
             return item.info == info && item.ownerPID == ownerPID
         }
-    }
-
-    private struct VisualHealthMetrics {
-        let width: Int
-        let height: Int
-        let alphaCoverage: Double
-        let meanLuma: Double
-        let lumaStandardDeviation: Double
-
-        var logString: String {
-            "size=\(width)x\(height) " +
-            "alpha=\(String(format: "%.2f", alphaCoverage)) " +
-            "luma=\(String(format: "%.1f", meanLuma)) " +
-            "stdev=\(String(format: "%.1f", lumaStandardDeviation))"
-        }
-    }
-
-    private struct MovedItemMatch {
-        let item: MenuBarItem
-        let method: String
     }
 
     private let container: LayoutBarContainer
@@ -464,16 +437,10 @@ final class LayoutBarPaddingView: NSView {
         }
 
         movingWindowIDs.insert(item.windowID)
-        var preMoveImage: CGImage?
         if section.name == .visible {
-            let debugWindowIDs = uniqueWindowIDs(from: [item.windowID, targetItem.windowID])
-            appState.imageCache.setLayoutDebugWindowIDs(debugWindowIDs)
             Logger.layoutBar.debug(
-                "Visible move debug source=\(item.logString) target=\(targetItem.logString) expected=\(expectedItems.map(\.logString).joined(separator: " | "))"
+                "Visible move source=\(item.logString) target=\(targetItem.logString)"
             )
-            let visualSnapshots = container.freezeCurrentImages()
-            preMoveImage = visualSnapshots.first { $0.item.windowID == item.windowID }?.image
-            appState.imageCache.retainVisualImages(visualSnapshots)
         }
         container.canSetArrangedViews = false
         if section.name == .visible {
@@ -494,11 +461,10 @@ final class LayoutBarPaddingView: NSView {
                 }
                 self.container.isSettlingMove = false
                 sourceView.oldContainerInfo = nil
-                appState.imageCache.clearLayoutDebugWindowIDs()
             }
             do {
                 if self.section.name == .visible {
-                    Logger.layoutBar.debug("Applying direct visible move for dragged item \(item.logString)")
+                    Logger.layoutBar.debug("Applying visible drag move for \(item.logString)")
                     do {
                         try await appState.itemManager.moveVisibleItem(
                             item: item,
@@ -508,19 +474,13 @@ final class LayoutBarPaddingView: NSView {
                         )
                     } catch {
                         Logger.layoutBar.info(
-                            "Visible direct move reported an event error; waiting for menu bar state: \(error)"
+                            "Visible drag move reported an event error; waiting for menu bar state: \(error)"
                         )
                     }
                     try? await Task.sleep(for: .milliseconds(150))
                     await appState.itemManager.cacheItemsRegardless()
-                    Logger.layoutBar.debug("Visible direct move completed; using actual menu bar order")
+                    Logger.layoutBar.debug("Visible drag move completed; using actual menu bar order")
                     await self.refreshImagesAfterMove(appState: appState, expectedItems: expectedItems)
-                    self.logPostMoveHealth(
-                        appState: appState,
-                        originalItem: item,
-                        preMoveImage: preMoveImage,
-                        desiredWindowIDs: desiredWindowIDs
-                    )
                     return
                 }
 
@@ -571,194 +531,6 @@ final class LayoutBarPaddingView: NSView {
                 await self.refreshImagesAfterMove(appState: appState, expectedItems: expectedItems)
             }
         }
-    }
-
-    private func logPostMoveHealth(
-        appState: AppState,
-        originalItem: MenuBarItem,
-        preMoveImage: CGImage?,
-        desiredWindowIDs: [CGWindowID]
-    ) {
-        guard section.name == .visible else {
-            return
-        }
-
-        guard
-            let match = movedItemMatch(
-                appState: appState,
-                originalItem: originalItem,
-                desiredWindowIDs: desiredWindowIDs
-            )
-        else {
-            Logger.layoutBar.info(
-                "Post-move health source=\(originalItem.logString) status=missing match=none"
-            )
-            return
-        }
-
-        let postImage = appState.imageCache.windowImages[match.item.windowID] ??
-            (!match.item.hasGenericIdentity ? appState.imageCache.images[match.item.info] : nil)
-        guard let postImage else {
-            Logger.layoutBar.info(
-                "Post-move health source=\(originalItem.logString) matched=\(match.item.logString) match=\(match.method) status=missing-image"
-            )
-            return
-        }
-
-        let preMetrics = preMoveImage.flatMap(visualHealthMetrics)
-        guard let postMetrics = visualHealthMetrics(for: postImage) else {
-            Logger.layoutBar.info(
-                "Post-move health source=\(originalItem.logString) matched=\(match.item.logString) match=\(match.method) status=unreadable-image"
-            )
-            return
-        }
-
-        let status = postMoveHealthStatus(preMetrics: preMetrics, postMetrics: postMetrics)
-        let preLog = preMetrics.map { " pre=[\($0.logString)]" } ?? " pre=missing"
-        Logger.layoutBar.info(
-            "Post-move health source=\(originalItem.logString) matched=\(match.item.logString) match=\(match.method) status=\(status) post=[\(postMetrics.logString)]\(preLog)"
-        )
-    }
-
-    private func movedItemMatch(
-        appState: AppState,
-        originalItem: MenuBarItem,
-        desiredWindowIDs: [CGWindowID]
-    ) -> MovedItemMatch? {
-        let visibleItems = appState.itemManager.itemCache.managedItems(for: .visible)
-        if let exact = visibleItems.first(where: { $0.windowID == originalItem.windowID }) {
-            return MovedItemMatch(item: exact, method: "windowID")
-        }
-
-        if !originalItem.hasGenericIdentity,
-            let stable = visibleItems.first(where: {
-                $0.info == originalItem.info && $0.ownerPID == originalItem.ownerPID
-            })
-        {
-            return MovedItemMatch(item: stable, method: "stable-info")
-        }
-
-        let genericCandidates = visibleItems.filter {
-            $0.info == originalItem.info &&
-            $0.ownerPID == originalItem.ownerPID &&
-            abs($0.frame.width - originalItem.frame.width) <= 8
-        }
-        if genericCandidates.count == 1, let candidate = genericCandidates.first {
-            return MovedItemMatch(item: candidate, method: "generic-size")
-        }
-
-        let actualWindowIDs = visibleItems.map(\.windowID)
-        let relevantItems = visibleItems.filter { desiredWindowIDs.contains($0.windowID) }
-        let relevantDesiredWindowIDs = desiredWindowIDs.filter { actualWindowIDs.contains($0) }
-        if
-            let desiredIndex = relevantDesiredWindowIDs.firstIndex(of: originalItem.windowID),
-            relevantItems.indices.contains(desiredIndex)
-        {
-            return MovedItemMatch(
-                item: relevantItems[desiredIndex],
-                method: "expected-index candidates=\(genericCandidates.count)"
-            )
-        }
-
-        return nil
-    }
-
-    private func postMoveHealthStatus(
-        preMetrics: VisualHealthMetrics?,
-        postMetrics: VisualHealthMetrics
-    ) -> String {
-        if let preMetrics, preMetrics.alphaCoverage > 0.03 {
-            let alphaRatio = postMetrics.alphaCoverage / preMetrics.alphaCoverage
-            if alphaRatio < 0.35 {
-                return "blank-alpha-drop"
-            }
-            if alphaRatio < 0.70 {
-                return "degraded-alpha"
-            }
-        } else if postMetrics.alphaCoverage < 0.02 {
-            return "blank-alpha"
-        }
-
-        // Menu bar template images are often pure black alpha masks, so luma
-        // variance is only useful for non-template images.
-        if
-            let preMetrics,
-            preMetrics.lumaStandardDeviation > 4,
-            postMetrics.lumaStandardDeviation < preMetrics.lumaStandardDeviation * 0.35
-        {
-            return "degraded-detail"
-        }
-        return "healthy"
-    }
-
-    private func visualHealthMetrics(for image: CGImage) -> VisualHealthMetrics? {
-        let width = 32
-        let height = 32
-        var pixels = [UInt8](repeating: 0, count: width * height * 4)
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue |
-            CGBitmapInfo.byteOrder32Big.rawValue
-
-        let didDraw = pixels.withUnsafeMutableBytes { bytes -> Bool in
-            guard
-                let context = CGContext(
-                    data: bytes.baseAddress,
-                    width: width,
-                    height: height,
-                    bitsPerComponent: 8,
-                    bytesPerRow: width * 4,
-                    space: colorSpace,
-                    bitmapInfo: bitmapInfo
-                )
-            else {
-                return false
-            }
-            context.interpolationQuality = .medium
-            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-            return true
-        }
-        guard didDraw else {
-            return nil
-        }
-
-        var lumas = [Double]()
-        lumas.reserveCapacity(width * height)
-        var visiblePixelCount = 0
-        for index in stride(from: 0, to: pixels.count, by: 4) {
-            let alpha = Double(pixels[index + 3]) / 255
-            guard alpha > 0.03 else {
-                continue
-            }
-            visiblePixelCount += 1
-            let red = Double(pixels[index])
-            let green = Double(pixels[index + 1])
-            let blue = Double(pixels[index + 2])
-            lumas.append((0.2126 * red) + (0.7152 * green) + (0.0722 * blue))
-        }
-
-        guard !lumas.isEmpty else {
-            return VisualHealthMetrics(
-                width: image.width,
-                height: image.height,
-                alphaCoverage: 0,
-                meanLuma: 0,
-                lumaStandardDeviation: 0
-            )
-        }
-
-        let mean = lumas.reduce(0, +) / Double(lumas.count)
-        let variance = lumas.reduce(0) { partialResult, luma in
-            let difference = luma - mean
-            return partialResult + (difference * difference)
-        } / Double(lumas.count)
-
-        return VisualHealthMetrics(
-            width: image.width,
-            height: image.height,
-            alphaCoverage: Double(visiblePixelCount) / Double(width * height),
-            meanLuma: mean,
-            lumaStandardDeviation: sqrt(variance)
-        )
     }
 
     private func refreshImagesAfterMove(
