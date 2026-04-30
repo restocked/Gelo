@@ -7,17 +7,42 @@ import SwiftUI
 
 struct MenuBarLayoutSettingsPane: View {
     @EnvironmentObject var appState: AppState
+    @State private var isWarmingLayoutCache = false
 
     var body: some View {
-        if !ScreenCapture.cachedCheckPermissions() {
+        if !hasScreenRecordingPermission {
             missingScreenRecordingPermission
         } else if appState.menuBarManager.isMenuBarHiddenBySystemUserDefaults {
             cannotArrange
         } else {
             IceForm(alignment: .leading, spacing: 20) {
                 header
+                if isWarmingLayoutCache && appState.itemManager.itemCache.isEmpty {
+                    loadingState
+                }
                 layoutBars
             }
+            .task {
+                await warmLayoutCache()
+            }
+        }
+    }
+
+    private var hasScreenRecordingPermission: Bool {
+        appState.permissionsManager.screenRecordingPermission.hasPermission
+    }
+
+    @ViewBuilder
+    private var loadingState: some View {
+        IceGroupBox {
+            HStack(spacing: 10) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Loading menu bar items")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
@@ -87,5 +112,17 @@ struct MenuBarLayoutSettingsPane: View {
                     .opacity(section.isEnabled ? 1 : 0.55)
             }
         }
+    }
+
+    private func warmLayoutCache() async {
+        // Let SwiftUI finish presenting the pane before doing AX/window-list
+        // discovery and image capture for the layout bars.
+        try? await Task.sleep(for: .milliseconds(100))
+        isWarmingLayoutCache = true
+        await appState.itemManager.warmLayoutCacheForSettings()
+        if hasScreenRecordingPermission {
+            await appState.imageCache.updateCache(sections: MenuBarSection.Name.allCases)
+        }
+        isWarmingLayoutCache = false
     }
 }

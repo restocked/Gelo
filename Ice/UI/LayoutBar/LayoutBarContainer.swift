@@ -8,6 +8,14 @@ import Combine
 
 /// A container for the items in the menu bar layout interface.
 final class LayoutBarContainer: NSView {
+    struct DragMoveIntent {
+        let sourceView: LayoutBarItemView
+        let sourceIndex: Int
+        let destinationView: LayoutBarItemView
+        let destinationIndex: Int
+        let arrangedViews: [LayoutBarItemView]
+    }
+
     /// Phases for a dragging session.
     enum DraggingPhase {
         case entered, exited, updated, ended
@@ -42,6 +50,23 @@ final class LayoutBarContainer: NSView {
     /// A Boolean value that indicates whether the container can
     /// set its arranged views.
     var canSetArrangedViews = true
+
+    /// The latest concrete reorder represented by the drag preview.
+    var dragMoveIntent: DragMoveIntent?
+
+    /// A Boolean value that indicates whether the container is waiting for
+    /// macOS to settle after a physical menu bar move.
+    var isSettlingMove = false {
+        didSet {
+            guard isSettlingMove != oldValue else {
+                return
+            }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.12
+                animator().alphaValue = isSettlingMove ? 0.55 : 1
+            }
+        }
+    }
 
     /// The amount of space between each arranged view.
     var spacing: CGFloat {
@@ -100,13 +125,18 @@ final class LayoutBarContainer: NSView {
                 }
                 .store(in: &c)
 
-            appState.imageCache.$images
-                .removeDuplicates()
+            Publishers.Merge(
+                appState.imageCache.$windowImages.mapToVoid(),
+                appState.imageCache.$images.mapToVoid()
+            )
                 .sink { [weak self] _ in
                     guard let self else {
                         return
                     }
                     DispatchQueue.main.async {
+                        guard !self.isSettlingMove else {
+                            return
+                        }
                         self.layoutArrangedViews()
                     }
                 }
@@ -198,8 +228,12 @@ final class LayoutBarContainer: NSView {
             return
         }
         var newViews = [LayoutBarItemView]()
+        var usedViewIDs = Set<ObjectIdentifier>()
         for item in items {
-            if let existingView = arrangedViews.first(where: { $0.item == item }) {
+            if let existingView = arrangedViews.first(where: {
+                $0.item == item && !usedViewIDs.contains(ObjectIdentifier($0))
+            }) {
+                usedViewIDs.insert(ObjectIdentifier(existingView))
                 newViews.append(existingView)
             } else {
                 let view = LayoutBarItemView(appState: appState, item: item)
@@ -232,6 +266,7 @@ final class LayoutBarContainer: NSView {
             if let sourceIndex = arrangedViews.firstIndex(of: sourceView) {
                 shouldAnimateNextLayoutPass = false
                 arrangedViews.remove(at: sourceIndex)
+                dragMoveIntent = nil
             }
             return .move
         case .updated:
@@ -244,6 +279,7 @@ final class LayoutBarContainer: NSView {
             // updating normally relies on the presence of other arranged views,
             // but if the container is empty, it needs to be handled separately
             guard !arrangedViews.filter({ $0.isEnabled }).isEmpty else {
+                shouldAnimateNextLayoutPass = false
                 arrangedViews.insert(sourceView, at: 0)
                 return .move
             }
@@ -270,6 +306,7 @@ final class LayoutBarContainer: NSView {
                 }
             }
             if let sourceIndex = arrangedViews.firstIndex(of: sourceView) {
+                shouldAnimateNextLayoutPass = false
                 if destinationIndex > sourceIndex {
                     guard draggingLocation.x > destinationView.frame.midX else {
                         return .move
@@ -287,10 +324,25 @@ final class LayoutBarContainer: NSView {
                     targetIndex += 1
                 }
                 arrangedViews.move(fromOffsets: [sourceIndex], toOffset: targetIndex)
+                dragMoveIntent = DragMoveIntent(
+                    sourceView: sourceView,
+                    sourceIndex: sourceIndex,
+                    destinationView: destinationView,
+                    destinationIndex: destinationIndex,
+                    arrangedViews: arrangedViews
+                )
             } else {
                 // source view is being dragged from another container,
                 // so just insert it
+                shouldAnimateNextLayoutPass = false
                 arrangedViews.insert(sourceView, at: destinationIndex)
+                dragMoveIntent = DragMoveIntent(
+                    sourceView: sourceView,
+                    sourceIndex: sourceView.oldContainerInfo?.index ?? destinationIndex,
+                    destinationView: destinationView,
+                    destinationIndex: destinationIndex,
+                    arrangedViews: arrangedViews
+                )
             }
             return .move
         case .ended:
@@ -313,4 +365,8 @@ final class LayoutBarContainer: NSView {
             return distance1 < distance2
         }
     }
+}
+
+extension Logger {
+    static let layoutBar = Logger(category: "LayoutBar")
 }

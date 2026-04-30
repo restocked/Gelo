@@ -89,8 +89,24 @@ final class MenuBarItemImageCache: ObservableObject {
     }
 
     /// Logs a reason for skipping the cache.
-    private func logSkippingCache(reason: String) {
-        Logger.imageCache.debug("Skipping menu bar item image cache as \(reason)")
+    private func logSkippingCache(reason _: String) {
+        // Normal state changes can trigger many skipped refreshes. Keep this
+        // quiet so layout debugging remains readable.
+    }
+
+    /// Returns the best currently available image for a menu bar item.
+    func image(
+        for item: MenuBarItem,
+        windowImages: [CGWindowID: CGImage],
+        images: [MenuBarItemInfo: CGImage]
+    ) -> CGImage? {
+        if let image = windowImages[item.windowID] {
+            return image
+        }
+        if !item.hasGenericIdentity, let image = images[item.info] {
+            return image
+        }
+        return nil
     }
 
     /// Returns a Boolean value that indicates whether caching menu bar items failed for
@@ -127,6 +143,13 @@ final class MenuBarItemImageCache: ObservableObject {
         var capturedImages = CapturedImages()
         let backingScaleFactor = screen.backingScaleFactor
         let displayBounds = CGDisplayBounds(screen.displayID)
+        let menuBarHeight = screen.getMenuBarHeight() ?? NSStatusBar.system.thickness
+        let menuBarFrame = CGRect(
+            x: displayBounds.minX,
+            y: displayBounds.minY,
+            width: displayBounds.width,
+            height: menuBarHeight
+        )
         let option: CGWindowImageOption = [.boundsIgnoreFraming, .bestResolution]
         let defaultItemThickness = NSStatusBar.system.thickness * backingScaleFactor
 
@@ -140,7 +163,7 @@ final class MenuBarItemImageCache: ObservableObject {
             guard
                 // Use the most up-to-date window frame.
                 let itemFrame = Bridging.getWindowFrame(for: windowID),
-                itemFrame.minY == displayBounds.minY
+                frameIsCapturable(itemFrame, in: menuBarFrame, for: section)
             else {
                 continue
             }
@@ -180,7 +203,7 @@ final class MenuBarItemImageCache: ObservableObject {
                 capturedImages.imagesByWindowID[windowID] = itemImage
             }
         } else {
-            Logger.imageCache.warning("Composite image capture failed. Attempting to capturing items individually.")
+            Logger.imageCache.warning("Composite image capture failed. Attempting to capture items individually.")
 
             for windowID in windowIDs {
                 guard
@@ -213,6 +236,19 @@ final class MenuBarItemImageCache: ObservableObject {
         return capturedImages
     }
 
+    private func frameIsCapturable(
+        _ frame: CGRect,
+        in menuBarFrame: CGRect,
+        for section: MenuBarSection.Name
+    ) -> Bool {
+        switch section {
+        case .visible:
+            return frame.intersects(menuBarFrame)
+        case .hidden, .alwaysHidden:
+            return frame.minY < menuBarFrame.maxY && frame.maxY > menuBarFrame.minY
+        }
+    }
+
     /// Updates the cache for the given sections, without checking whether caching is necessary.
     func updateCacheWithoutChecks(sections: [MenuBarSection.Name]) async {
         guard
@@ -243,6 +279,7 @@ final class MenuBarItemImageCache: ObservableObject {
         let allValidInfos = Set(allItems.map(\.info))
         let allValidWindowIDs = Set(allItems.map(\.windowID))
 
+        let menuBarHeight = screen.getMenuBarHeight()
         await MainActor.run { [newImages, newWindowImages, allValidInfos, allValidWindowIDs] in
             // Remove images for items that no longer exist in the item cache
             images = images.filter { allValidInfos.contains($0.key) }
@@ -250,10 +287,9 @@ final class MenuBarItemImageCache: ObservableObject {
             // Merge in the new images
             images.merge(newImages) { (_, new) in new }
             windowImages.merge(newWindowImages) { (_, new) in new }
+            self.screen = NSScreen.main
+            self.menuBarHeight = menuBarHeight
         }
-
-        self.screen = screen
-        self.menuBarHeight = screen.getMenuBarHeight()
     }
 
     /// Updates the cache for the given sections, if necessary.

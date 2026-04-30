@@ -47,7 +47,7 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var sidebar: some View {
-        List(selection: $navigationState.settingsNavigationIdentifier) {
+        List(selection: deferredNavigationSelection) {
             Section {
                 ForEach(SettingsNavigationIdentifier.allCases, id: \.self) { identifier in
                     sidebarItem(for: identifier)
@@ -80,6 +80,19 @@ struct SettingsView: View {
             AdvancedSettingsPane()
         case .about:
             AboutSettingsPane()
+        }
+    }
+
+    private var deferredNavigationSelection: Binding<SettingsNavigationIdentifier> {
+        Binding {
+            navigationState.settingsNavigationIdentifier
+        } set: { identifier in
+            DispatchQueue.main.async {
+                guard navigationState.settingsNavigationIdentifier != identifier else {
+                    return
+                }
+                navigationState.settingsNavigationIdentifier = identifier
+            }
         }
     }
 

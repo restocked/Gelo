@@ -60,8 +60,11 @@ final class AppState: ObservableObject {
     /// A Boolean value that indicates whether the "ShowOnHover" feature is prevented.
     private(set) var isShowOnHoverPrevented = false
 
-    /// Storage for internal observers.
+    /// Storage for app-wide observers.
     private var cancellables = Set<AnyCancellable>()
+
+    /// Storage for settings-window observers.
+    private var settingsWindowCancellables = Set<AnyCancellable>()
 
     /// A Boolean value that indicates whether the app is running as a SwiftUI preview.
     let isPreview: Bool = {
@@ -81,7 +84,7 @@ final class AppState: ObservableObject {
         set { Bridging.setConnectionProperty(newValue, forKey: "SetsCursorInBackground") }
     }
 
-    /// Configures the internal observers for the app state.
+    /// Configures the app-wide observers for the app state.
     private func configureCancellables() {
         var c = Set<AnyCancellable>()
 
@@ -119,25 +122,6 @@ final class AppState: ObservableObject {
             }
             .store(in: &c)
 
-        if let settingsWindow {
-            settingsWindow.publisher(for: \.isVisible)
-                .debounce(for: 0.05, scheduler: DispatchQueue.main)
-                .sink { [weak self] isVisible in
-                    DispatchQueue.main.async { [weak self] in
-                        guard
-                            let self,
-                            self.navigationState.isSettingsPresented != isVisible
-                        else {
-                            return
-                        }
-                        self.navigationState.isSettingsPresented = isVisible
-                    }
-                }
-                .store(in: &c)
-        } else {
-            Logger.appState.warning("No settings window!")
-        }
-
         Publishers.Merge(
             navigationState.$isAppFrontmost,
             navigationState.$isSettingsPresented
@@ -154,11 +138,7 @@ final class AppState: ObservableObject {
                 try? await Task.sleep(for: .milliseconds(100))
                 let shouldUpdateImages = await MainActor.run {
                     self.navigationState.isIceBarPresented ||
-                    self.navigationState.isSearchPresented ||
-                    (
-                        self.navigationState.isSettingsPresented &&
-                        self.navigationState.settingsNavigationIdentifier == .menuBarLayout
-                    )
+                    self.navigationState.isSearchPresented
                 }
                 guard shouldUpdateImages else {
                     return
@@ -195,6 +175,43 @@ final class AppState: ObservableObject {
         cancellables = c
     }
 
+    /// Configures observers that depend on the settings window instance.
+    private func configureSettingsWindowCancellables() {
+        var c = Set<AnyCancellable>()
+
+        guard let settingsWindow else {
+            settingsWindowCancellables = c
+            return
+        }
+
+        settingsWindow.publisher(for: \.isVisible)
+            .debounce(for: 0.05, scheduler: DispatchQueue.main)
+            .sink { [weak self] isVisible in
+                DispatchQueue.main.async { [weak self] in
+                    guard
+                        let self,
+                        self.navigationState.isSettingsPresented != isVisible
+                    else {
+                        return
+                    }
+                    self.navigationState.isSettingsPresented = isVisible
+                }
+            }
+            .store(in: &c)
+
+        settingsWindowCancellables = c
+        let isVisible = settingsWindow.isVisible
+        DispatchQueue.main.async { [weak self] in
+            guard
+                let self,
+                self.navigationState.isSettingsPresented != isVisible
+            else {
+                return
+            }
+            self.navigationState.isSettingsPresented = isVisible
+        }
+    }
+
     /// Sets up the app state.
     func performSetup() {
         configureCancellables()
@@ -207,6 +224,23 @@ final class AppState: ObservableObject {
         imageCache.performSetup()
         updatesManager.performSetup()
         userNotificationManager.performSetup()
+        prewarmLayoutCacheAfterLaunch()
+    }
+
+    /// Prewarms the menu bar layout cache after launch so the first Settings
+    /// layout visit can usually render from cached item discovery.
+    private func prewarmLayoutCacheAfterLaunch() {
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard
+                let self,
+                !navigationState.isSettingsPresented,
+                permissionsManager.screenRecordingPermission.hasPermission
+            else {
+                return
+            }
+            await self.itemManager.warmLayoutCacheForSettings()
+        }
     }
 
     /// Assigns the app delegate to the app state.
@@ -224,8 +258,11 @@ final class AppState: ObservableObject {
             Logger.appState.warning("Window \(window.identifier?.rawValue ?? "<NIL>") is not the settings window!")
             return
         }
+        guard settingsWindow !== window else {
+            return
+        }
         settingsWindow = window
-        configureCancellables()
+        configureSettingsWindowCancellables()
     }
 
     /// Assigns the permissions window to the app state.
@@ -235,7 +272,6 @@ final class AppState: ObservableObject {
             return
         }
         permissionsWindow = window
-        configureCancellables()
     }
 
     /// Opens the settings window.

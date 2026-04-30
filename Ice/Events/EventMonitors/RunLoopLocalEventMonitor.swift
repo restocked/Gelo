@@ -11,6 +11,7 @@ final class RunLoopLocalEventMonitor {
     private let mode: RunLoop.Mode
     private let handler: (NSEvent) -> NSEvent?
     private let observer: CFRunLoopObserver
+    private var isStarted = false
 
     /// Creates an event monitor with the given event type mask and handler.
     ///
@@ -60,19 +61,27 @@ final class RunLoopLocalEventMonitor {
     }
 
     func start() {
+        guard !isStarted else {
+            return
+        }
         CFRunLoopAddObserver(
             runLoop,
             observer,
             CFRunLoopMode(mode.rawValue as CFString)
         )
+        isStarted = true
     }
 
     func stop() {
+        guard isStarted else {
+            return
+        }
         CFRunLoopRemoveObserver(
             runLoop,
             observer,
             CFRunLoopMode(mode.rawValue as CFString)
         )
+        isStarted = false
     }
 }
 

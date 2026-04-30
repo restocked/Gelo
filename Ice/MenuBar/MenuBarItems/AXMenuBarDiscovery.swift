@@ -32,6 +32,30 @@ struct AXMenuBarItemIdentity {
         )
     }
 
+    var identityQualityScore: Int {
+        let values = [
+            title,
+            description,
+            valueDescription,
+            help,
+        ].compactMap { $0?.nonEmptyTrimmedValue }
+
+        var score = 0
+        if
+            let identifierValue = identifier?.nonEmptyTrimmedValue,
+            Self.isUsefulIdentifier(identifierValue)
+        {
+            score += 100
+        }
+        if values.contains(where: { !Self.isGenericName($0) && !Self.isBundleIdentifierLike($0) }) {
+            score += 25
+        }
+        if values.contains(where: { Self.isBundleIdentifierLike($0) }) {
+            score -= 10
+        }
+        return score
+    }
+
     private static func bestTitle(
         title: String?,
         identifier: String?,
@@ -39,21 +63,35 @@ struct AXMenuBarItemIdentity {
         help: String?,
         valueDescription: String?
     ) -> String {
+        if
+            let identifierValue = identifier?.nonEmptyTrimmedValue,
+            isUsefulIdentifier(identifierValue)
+        {
+            return identifierValue
+        }
+
         let candidates = [
             title,
             description,
             valueDescription,
             help,
-            identifier,
         ]
 
         let values = candidates.compactMap { $0?.nonEmptyTrimmedValue }
+
+        if let meaningful = values.first(where: { !isGenericName($0) && !isBundleIdentifierLike($0) }) {
+            return meaningful
+        }
+
+        if let identifierValue = identifier?.nonEmptyTrimmedValue, !isGenericName(identifierValue) {
+            return identifierValue
+        }
 
         if let meaningful = values.first(where: { !isGenericName($0) }) {
             return meaningful
         }
 
-        return values.first ?? ""
+        return values.first ?? identifier?.nonEmptyTrimmedValue ?? ""
     }
 
     private static func isGenericName(_ value: String) -> Bool {
@@ -61,6 +99,23 @@ struct AXMenuBarItemIdentity {
             return false
         }
         return value.dropFirst("Item-".count).allSatisfy(\.isNumber)
+    }
+
+    private static func isUsefulIdentifier(_ value: String) -> Bool {
+        !isGenericName(value) && !isBundleIdentifierLike(value)
+    }
+
+    private static func isBundleIdentifierLike(_ value: String) -> Bool {
+        guard !value.contains(" ") else {
+            return false
+        }
+        let components = value.split(separator: ".")
+        guard components.count >= 3 else {
+            return false
+        }
+        return components.allSatisfy { component in
+            component.contains { $0.isLetter || $0.isNumber }
+        }
     }
 }
 
@@ -125,7 +180,7 @@ enum AXMenuBarDiscovery {
                 let help: String? = try? child.attribute(.help)
                 let valueDescription: String? = try? child.attribute(.valueDescription)
 
-                map[AXFrameKey(frame)] = AXMenuBarItemIdentity(
+                let identity = AXMenuBarItemIdentity(
                     bundleIdentifier: bundleIdentifier,
                     title: title,
                     identifier: identifier,
@@ -134,6 +189,13 @@ enum AXMenuBarDiscovery {
                     valueDescription: valueDescription,
                     frame: frame
                 )
+                let key = AXFrameKey(frame)
+                if let existing = map[key] {
+                    if existing.identityQualityScore >= identity.identityQualityScore {
+                        continue
+                    }
+                }
+                map[key] = identity
             }
         }
 
