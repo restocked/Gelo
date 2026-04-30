@@ -1696,7 +1696,7 @@ extension MenuBarItemManager {
                     do {
                         try await click(item: latest, with: mouseButton)
                     } catch {
-                        Logger.itemManager.error("ERROR: \(error)")
+                        Logger.itemManager.error("Failed to click already-visible \(latest.logString): \(error)")
                     }
                 }
             }
@@ -1752,13 +1752,13 @@ extension MenuBarItemManager {
                     try await slowMove(item: item, to: .leftOfItem(targetItem))
                     try await click(item: item, with: mouseButton)
                 } catch {
-                    Logger.itemManager.error("ERROR: \(error)")
+                    Logger.itemManager.error("Failed to temporarily show and click \(item.logString): \(error)")
                 }
             } else {
                 do {
                     try await move(item: item, to: .leftOfItem(targetItem))
                 } catch {
-                    Logger.itemManager.error("ERROR: \(error)")
+                    Logger.itemManager.error("Failed to temporarily show \(item.logString): \(error)")
                 }
             }
 
