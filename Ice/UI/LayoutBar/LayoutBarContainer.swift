@@ -55,7 +55,7 @@ final class LayoutBarContainer: NSView {
     var dragMoveIntent: DragMoveIntent?
 
     /// A Boolean value that indicates whether the container is waiting for
-    /// macOS to settle after a physical visible-section move.
+    /// macOS to settle after a physical menu bar move.
     var isSettlingMove = false {
         didSet {
             guard isSettlingMove != oldValue else {

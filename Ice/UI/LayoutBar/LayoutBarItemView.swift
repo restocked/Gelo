@@ -31,6 +31,9 @@ final class LayoutBarItemView: NSView {
     /// A Boolean value that indicates whether the item view is currently inside a container.
     var hasContainer = false
 
+    /// A Boolean value that indicates whether AppKit is still tracking this view's drag session.
+    var isDraggingSessionActive = false
+
     /// The image displayed inside the view.
     private var image: NSImage? {
         didSet {
@@ -199,6 +202,8 @@ extension LayoutBarItemView: NSDraggingSource {
     }
 
     func draggingSession(_ session: NSDraggingSession, willBeginAt screenPoint: NSPoint) {
+        isDraggingSessionActive = true
+
         // make sure the container doesn't update its arranged views and that items
         // aren't arranged during a dragging session
         if let container = superview as? LayoutBarContainer {
@@ -217,6 +222,7 @@ extension LayoutBarItemView: NSDraggingSource {
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
         defer {
             // always remove container info at the end of a session
+            isDraggingSessionActive = false
             oldContainerInfo = nil
         }
 

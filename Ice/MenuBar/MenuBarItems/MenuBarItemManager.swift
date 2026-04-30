@@ -727,18 +727,41 @@ extension MenuBarItemManager {
     /// Returns the end point for moving an item to the given destination.
     ///
     /// - Parameter destination: The destination to return the end point for.
-    private func getEndPoint(for destination: MoveDestination) throws -> CGPoint {
+    private func getEndPoint(
+        for destination: MoveDestination,
+        useInteriorAnchorPoint: Bool = false
+    ) throws -> CGPoint {
+        func leftInsertionX(for frame: CGRect) -> CGFloat {
+            let inset = min(max(frame.width * 0.46, 6), max((frame.width / 2) - 1, 1))
+            return frame.minX + inset
+        }
+
+        func rightInsertionX(for frame: CGRect) -> CGFloat {
+            let inset = min(max(frame.width * 0.25, 6), max((frame.width / 2) - 1, 1))
+            return frame.maxX - inset
+        }
+
         switch destination {
         case .leftOfItem(let targetItem):
             guard let currentFrame = getCurrentFrame(for: targetItem) else {
                 throw EventError(code: .invalidItem, item: targetItem)
             }
-            return CGPoint(x: currentFrame.minX, y: currentFrame.midY)
+            let x = if useInteriorAnchorPoint {
+                leftInsertionX(for: currentFrame)
+            } else {
+                currentFrame.minX
+            }
+            return CGPoint(x: x, y: currentFrame.midY)
         case .rightOfItem(let targetItem):
             guard let currentFrame = getCurrentFrame(for: targetItem) else {
                 throw EventError(code: .invalidItem, item: targetItem)
             }
-            return CGPoint(x: currentFrame.maxX, y: currentFrame.midY)
+            let x = if useInteriorAnchorPoint {
+                rightInsertionX(for: currentFrame)
+            } else {
+                currentFrame.maxX
+            }
+            return CGPoint(x: x, y: currentFrame.midY)
         }
     }
 
@@ -1238,15 +1261,16 @@ extension MenuBarItemManager {
         }
     }
 
-    /// Moves a visible menu bar item using a human-shaped drag gesture.
+    /// Moves a menu bar item using a human-shaped drag gesture.
     ///
     /// Some Control Center-hosted third-party status items are fragile when
     /// macOS receives the older offscreen down/up shortcut. Keep this path
     /// closer to a real user drag: press on the item, drag across the menu bar,
     /// then release at the destination.
-    private func dragVisibleItemWithoutRestoringMouseLocation(
+    private func dragItemWithoutRestoringMouseLocation(
         _ item: MenuBarItem,
-        to destination: MoveDestination
+        to destination: MoveDestination,
+        requireMenuBarDestination: Bool
     ) async throws {
         itemMoveCount += 1
         defer {
@@ -1264,10 +1288,19 @@ extension MenuBarItemManager {
         }
 
         let startPoint = CGPoint(x: currentFrame.midX, y: currentFrame.midY)
-        let endPoint = try getEndPoint(for: destination)
+        let endPoint = try getEndPoint(
+            for: destination,
+            useInteriorAnchorPoint: !requireMenuBarDestination
+        )
         let targetItem = getTargetItem(for: destination)
-        guard targetItem.hasUsableMoveDestinationFrame else {
-            throw EventError(code: .invalidItem, item: targetItem)
+        if requireMenuBarDestination {
+            guard targetItem.hasUsableMoveDestinationFrame else {
+                throw EventError(code: .invalidItem, item: targetItem)
+            }
+        } else {
+            guard targetItem.hasMoveDestinationFrame else {
+                throw EventError(code: .invalidItem, item: targetItem)
+            }
         }
 
         let dragPoints = (1...5).map { step in
@@ -1354,14 +1387,14 @@ extension MenuBarItemManager {
             )
         } catch {
             do {
-                Logger.itemManager.debug("Posting fallback event for visible drag of \(item.logString)")
+                Logger.itemManager.debug("Posting fallback event for drag of \(item.logString)")
                 try await postEventAndWaitToReceive(
                     fallbackEvent,
                     to: .sessionEventTap,
                     item: item
                 )
             } catch {
-                Logger.itemManager.error("Failed to post fallback event for visible drag of \(item.logString)")
+                Logger.itemManager.error("Failed to post fallback event for drag of \(item.logString)")
             }
             throw error
         }
@@ -1373,7 +1406,9 @@ extension MenuBarItemManager {
         item: MenuBarItem,
         to destination: MoveDestination,
         maxAttempts: Int = 2,
-        wakeUpOnFailure: Bool = false
+        wakeUpOnFailure: Bool = false,
+        requireMenuBarDestination: Bool = true,
+        waitForMouse: Bool = true
     ) async throws {
         if try itemHasCorrectPosition(item: item, for: destination) {
             Logger.itemManager.debug("\(item.logString) is already in the correct position")
@@ -1382,12 +1417,15 @@ extension MenuBarItemManager {
 
         do {
             try await waitForNoModifiersPressed()
-            try await waitForMouseToStopMoving()
+            if waitForMouse {
+                try await waitForMouseToStopMoving()
+            }
         } catch {
             throw EventError(code: .couldNotComplete, item: item)
         }
 
-        Logger.itemManager.info("Dragging visible \(item.logString) to \(destination.logString)")
+        let dragContext = requireMenuBarDestination ? "visible" : "layout"
+        Logger.itemManager.info("Dragging \(dragContext) \(item.logString) to \(destination.logString)")
 
         guard let appState else {
             throw EventError(code: .invalidAppState, item: item)
@@ -1413,16 +1451,20 @@ extension MenuBarItemManager {
 
         for n in 1...max(1, maxAttempts) {
             do {
-                try await dragVisibleItemWithoutRestoringMouseLocation(item, to: destination)
+                try await dragItemWithoutRestoringMouseLocation(
+                    item,
+                    to: destination,
+                    requireMenuBarDestination: requireMenuBarDestination
+                )
                 if try itemHasCompletedMove(item: item, to: destination, initialFrame: initialFrame) {
-                    Logger.itemManager.info("Successfully dragged visible \(item.logString)")
+                    Logger.itemManager.info("Successfully dragged \(dragContext) \(item.logString)")
                     break
                 } else {
                     throw EventError(code: .couldNotComplete, item: item)
                 }
             } catch {
                 if (try? itemHasCompletedMove(item: item, to: destination, initialFrame: initialFrame)) == true {
-                    Logger.itemManager.info("Successfully dragged visible \(item.logString) despite event error: \(error)")
+                    Logger.itemManager.info("Successfully dragged \(dragContext) \(item.logString) despite event error: \(error)")
                     break
                 }
 
@@ -1430,13 +1472,13 @@ extension MenuBarItemManager {
                     throw error
                 }
 
-                Logger.itemManager.warning("Attempt \(n) to drag visible \(item.logString) failed (error: \(error))")
+                Logger.itemManager.warning("Attempt \(n) to drag \(dragContext) \(item.logString) failed (error: \(error))")
                 if wakeUpOnFailure {
                     try await wakeUpItem(item)
                 } else {
                     try await Task.sleep(for: .milliseconds(100))
                 }
-                Logger.itemManager.info("Retrying visible drag of \(item.logString)")
+                Logger.itemManager.info("Retrying \(dragContext) drag of \(item.logString)")
             }
         }
     }

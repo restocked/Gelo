@@ -56,6 +56,9 @@ final class LayoutBarPaddingView: NSView {
     /// Window IDs for layout moves currently being applied from this layout bar.
     private var movingWindowIDs = Set<CGWindowID>()
 
+    /// Number of physical layout moves currently being applied by any layout bar.
+    private static var physicalMoveCount = 0
+
     /// The date until which drag/drop should be ignored after a layout move.
     private var dragCooldownEndDate: Date?
 
@@ -71,6 +74,10 @@ final class LayoutBarPaddingView: NSView {
         return Date.now < dragCooldownEndDate
     }
 
+    private var isAnyLayoutMoveActive: Bool {
+        Self.physicalMoveCount > 0
+    }
+
     /// The visible section is managed by Control Center on newer macOS
     /// versions and often needs an extra beat to settle after a synthetic drag.
     private var initialLayoutConvergenceDelay: Duration {
@@ -83,21 +90,25 @@ final class LayoutBarPaddingView: NSView {
     private var layoutConvergenceRetryDelay: Duration {
         switch section.name {
         case .visible: .milliseconds(350)
-        case .hidden, .alwaysHidden: .milliseconds(200)
+        case .hidden, .alwaysHidden: .milliseconds(50)
         }
     }
 
-    private var maxLayoutCorrections: Int {
+    private var hiddenPhysicalStepCooldownDelay: Duration {
+        .milliseconds(125)
+    }
+
+    private var dragCooldownDuration: TimeInterval {
         switch section.name {
-        case .visible: 0
-        case .hidden, .alwaysHidden: 2
+        case .visible: 0.35
+        case .hidden, .alwaysHidden: 0.05
         }
     }
 
     private var physicalMoveMaxAttempts: Int {
         switch section.name {
         case .visible: 1
-        case .hidden, .alwaysHidden: 2
+        case .hidden, .alwaysHidden: 1
         }
     }
 
@@ -172,7 +183,7 @@ final class LayoutBarPaddingView: NSView {
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard allowsDragging, !isDragCoolingDown, !container.isSettlingMove else {
+        guard allowsDragging, !isDragCoolingDown, !isAnyLayoutMoveActive, !container.isSettlingMove else {
             return []
         }
         isDraggingItem = true
@@ -181,7 +192,7 @@ final class LayoutBarPaddingView: NSView {
     }
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
-        guard allowsDragging, !isDragCoolingDown, !container.isSettlingMove else {
+        guard allowsDragging, !isDragCoolingDown, !isAnyLayoutMoveActive, !container.isSettlingMove else {
             return
         }
         if let sender {
@@ -190,7 +201,7 @@ final class LayoutBarPaddingView: NSView {
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard allowsDragging, !isDragCoolingDown, !container.isSettlingMove else {
+        guard allowsDragging, !isDragCoolingDown, !isAnyLayoutMoveActive, !container.isSettlingMove else {
             return []
         }
         return container.updateArrangedViewsForDrag(with: sender, phase: .updated)
@@ -199,6 +210,13 @@ final class LayoutBarPaddingView: NSView {
     override func draggingEnded(_ sender: NSDraggingInfo) {
         guard allowsDragging else {
             return
+        }
+        if
+            isDraggingItem,
+            let draggingSource = sender.draggingSource as? LayoutBarItemView,
+            isDragCoolingDown || isAnyLayoutMoveActive || container.isSettlingMove
+        {
+            restoreOriginalPosition(of: draggingSource)
         }
         container.updateArrangedViewsForDrag(with: sender, phase: .ended)
         if isDraggingItem {
@@ -209,10 +227,11 @@ final class LayoutBarPaddingView: NSView {
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard allowsDragging, !isDragCoolingDown, !container.isSettlingMove else {
+        guard let draggingSource = sender.draggingSource as? LayoutBarItemView else {
             return false
         }
-        guard let draggingSource = sender.draggingSource as? LayoutBarItemView else {
+        guard allowsDragging, !isDragCoolingDown, !isAnyLayoutMoveActive, !container.isSettlingMove else {
+            rejectDragOperation(from: draggingSource)
             return false
         }
         isDraggingItem = false
@@ -239,6 +258,14 @@ final class LayoutBarPaddingView: NSView {
             expectedItems: expectedItems
         )
         return true
+    }
+
+    private func rejectDragOperation(from sourceView: LayoutBarItemView) {
+        Logger.layoutBar.debug("Restoring rejected drag for \(sourceView.item.logString)")
+        restoreOriginalPosition(of: sourceView)
+        isDraggingItem = false
+        container.canSetArrangedViews = true
+        container.dragMoveIntent = nil
     }
 
     private func moveDestination(
@@ -320,35 +347,6 @@ final class LayoutBarPaddingView: NSView {
         case .hidden, .alwaysHidden:
             item.hasMoveDestinationFrame
         }
-    }
-
-    private func isUsableCorrectionTarget(_ item: MenuBarItem) -> Bool {
-        guard isUsableMoveTarget(item) else {
-            return false
-        }
-
-        // Visible-section correction should not use Gelo's own boundary items
-        // as normal anchors; they can be transient while sections are being
-        // shown or hidden. Direct drops can still use them when needed.
-        if section.name == .visible, item.info.namespace == .ice {
-            return false
-        }
-
-        return true
-    }
-
-    private func isUsableCorrectionSource(_ item: MenuBarItem) -> Bool {
-        guard item.isMovable, isUsableMoveTarget(item) else {
-            return false
-        }
-
-        // Gelo's own section boundary/control items are anchors for the layout
-        // algorithm, not user items that correction should shuffle around.
-        if section.name == .visible, item.info.namespace == .ice {
-            return false
-        }
-
-        return true
     }
 
     private func uniqueWindowIDs(from windowIDs: [CGWindowID]) -> [CGWindowID] {
@@ -437,100 +435,316 @@ final class LayoutBarPaddingView: NSView {
         }
 
         movingWindowIDs.insert(item.windowID)
+        Self.physicalMoveCount += 1
         if section.name == .visible {
             Logger.layoutBar.debug(
                 "Visible move source=\(item.logString) target=\(targetItem.logString)"
             )
         }
+        let oldContainer = sourceView.oldContainerInfo?.container
         container.canSetArrangedViews = false
-        if section.name == .visible {
-            container.isSettlingMove = true
-        }
-        sourceView.oldContainerInfo?.container.canSetArrangedViews = false
+        container.isSettlingMove = true
+        oldContainer?.canSetArrangedViews = false
+        oldContainer?.isSettlingMove = true
 
         Task { @MainActor in
             try await Task.sleep(for: .milliseconds(25))
-            defer {
+            await self.waitForAppKitDragSessionToEnd(sourceView)
+            var didFinishPhysicalMove = false
+            @MainActor
+            func finishPhysicalMove() {
+                guard !didFinishPhysicalMove else {
+                    return
+                }
+                didFinishPhysicalMove = true
                 self.movingWindowIDs.remove(item.windowID)
-                self.dragCooldownEndDate = Date.now.addingTimeInterval(0.35)
+                Self.physicalMoveCount = max(0, Self.physicalMoveCount - 1)
+                self.dragCooldownEndDate = Date.now.addingTimeInterval(self.dragCooldownDuration)
                 self.container.canSetArrangedViews = true
-                sourceView.oldContainerInfo?.container.canSetArrangedViews = true
+                oldContainer?.canSetArrangedViews = true
                 self.container.setArrangedViews(items: appState.itemManager.itemCache.managedItems(for: self.section.name))
-                if let oldContainer = sourceView.oldContainerInfo?.container {
+                if let oldContainer {
                     oldContainer.setArrangedViews(items: appState.itemManager.itemCache.managedItems(for: oldContainer.section.name))
+                    oldContainer.isSettlingMove = false
                 }
                 self.container.isSettlingMove = false
                 sourceView.oldContainerInfo = nil
             }
-            do {
-                if self.section.name == .visible {
-                    Logger.layoutBar.debug("Applying visible drag move for \(item.logString)")
-                    do {
-                        try await appState.itemManager.moveVisibleItem(
-                            item: item,
-                            to: destination,
-                            maxAttempts: self.physicalMoveMaxAttempts,
-                            wakeUpOnFailure: false
-                        )
-                    } catch {
-                        Logger.layoutBar.info(
-                            "Visible drag move reported an event error; waiting for menu bar state: \(error)"
-                        )
-                    }
-                    try? await Task.sleep(for: .milliseconds(150))
-                    await appState.itemManager.cacheItemsRegardless()
-                    Logger.layoutBar.debug("Visible drag move completed; using actual menu bar order")
-                    await self.refreshImagesAfterMove(appState: appState, expectedItems: expectedItems)
-                    return
+            defer {
+                finishPhysicalMove()
+            }
+            if self.section.name == .visible {
+                Logger.layoutBar.debug("Applying visible drag move for \(item.logString)")
+                do {
+                    try await appState.itemManager.moveVisibleItem(
+                        item: item,
+                        to: destination,
+                        maxAttempts: self.physicalMoveMaxAttempts,
+                        wakeUpOnFailure: false
+                    )
+                } catch {
+                    Logger.layoutBar.info(
+                        "Visible drag move reported an event error; waiting for menu bar state: \(error)"
+                    )
                 }
+                try? await Task.sleep(for: .milliseconds(150))
+                await appState.itemManager.cacheItemsRegardless()
+                Logger.layoutBar.debug("Visible drag move completed; using actual menu bar order")
+                await self.refreshImagesAfterMove(appState: appState, expectedItems: expectedItems)
+                return
+            }
 
+            await self.moveHiddenItemStepwise(
+                appState: appState,
+                item: item,
+                destination: destination,
+                desiredWindowIDs: desiredWindowIDs
+            )
+            appState.itemManager.removeTempShownItemFromCache(with: item)
+            Logger.layoutBar.debug("Layout move completed; using actual menu bar order")
+            finishPhysicalMove()
+            await self.refreshImagesAfterMove(appState: appState, expectedItems: expectedItems)
+        }
+    }
+
+    private func waitForAppKitDragSessionToEnd(_ sourceView: LayoutBarItemView) async {
+        for _ in 0..<20 {
+            guard sourceView.isDraggingSessionActive else {
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        Logger.layoutBar.debug("Continuing layout move while AppKit drag session is still ending for \(sourceView.item.logString)")
+    }
+
+    private func moveHiddenItemUsingBestAvailablePath(
+        appState: AppState,
+        item: MenuBarItem,
+        destination: MenuBarItemManager.MoveDestination
+    ) async {
+        let targetItem = switch destination {
+        case .leftOfItem(let item), .rightOfItem(let item): item
+        }
+
+        do {
+            if item.hasMoveDestinationFrame, targetItem.hasMoveDestinationFrame {
+                Logger.layoutBar.debug("Applying frame-based layout drag move for \(item.logString)")
+                try await appState.itemManager.moveVisibleItem(
+                    item: item,
+                    to: destination,
+                    maxAttempts: self.physicalMoveMaxAttempts,
+                    wakeUpOnFailure: false,
+                    requireMenuBarDestination: false,
+                    waitForMouse: false
+                )
+            } else {
                 try await appState.itemManager.move(
                     item: item,
                     to: destination,
                     maxAttempts: self.physicalMoveMaxAttempts,
                     wakeUpOnFailure: false
                 )
-                appState.itemManager.removeTempShownItemFromCache(with: item)
-                let didConverge = await self.convergeLayoutOrder(
-                    appState: appState,
-                    desiredWindowIDs: desiredWindowIDs,
-                    maxCorrections: self.maxLayoutCorrections
+            }
+        } catch {
+            Logger.layoutBar.info(
+                "Layout move reported an event error; using actual menu bar order: \(error)"
+            )
+        }
+    }
+
+    private func moveHiddenItemStepwise(
+        appState: AppState,
+        item: MenuBarItem,
+        destination: MenuBarItemManager.MoveDestination,
+        desiredWindowIDs: [CGWindowID]
+    ) async {
+        await appState.itemManager.cacheItemsRegardless()
+
+        await moveHiddenItemUsingBestAvailablePath(
+            appState: appState,
+            item: item,
+            destination: destination
+        )
+        if await cacheHiddenItemsUntilDesiredOrder(
+            appState: appState,
+            desiredWindowIDs: desiredWindowIDs
+        ) {
+            Logger.layoutBar.debug("Direct hidden layout move completed for \(item.logString)")
+            return
+        }
+        logHiddenLayoutMismatch(
+            appState: appState,
+            item: item,
+            desiredWindowIDs: desiredWindowIDs,
+            reason: "direct move did not match desired order"
+        )
+
+        let maxSteps = max(1, min(desiredWindowIDs.count + 1, 8))
+        for step in 0..<maxSteps {
+            let actualItems = appState.itemManager.itemCache.managedItems(for: section.name)
+            let actualRelevantItems = actualItems.filter { desiredWindowIDs.contains($0.windowID) }
+
+            guard
+                let actualIndex = actualRelevantItems.firstIndex(where: { $0.windowID == item.windowID }),
+                let desiredIndex = desiredWindowIDs.firstIndex(of: item.windowID)
+            else {
+                Logger.layoutBar.info(
+                    "Could not find stepwise layout position for \(item.logString); using actual menu bar order"
                 )
-                if !didConverge {
-                    if self.section.name == .visible {
-                        Logger.layoutBar.info(
-                            "Visible layout move did not converge immediately for \(item.logString); using actual menu bar order"
-                        )
-                    } else {
-                        Logger.layoutBar.warning("Layout move did not converge for \(item.logString)")
-                    }
+                return
+            }
+
+            if actualIndex == desiredIndex {
+                if step > 0 {
+                    Logger.layoutBar.debug("Stepwise layout move completed for \(item.logString) in \(step) step(s)")
                 }
-                await self.refreshImagesAfterMove(appState: appState, expectedItems: expectedItems)
-            } catch {
-                if self.section.name == .visible {
-                    Logger.layoutBar.info("Visible layout move reported an event error: \(error)")
-                    await self.refreshImagesAfterMove(appState: appState, expectedItems: expectedItems)
+                return
+            }
+
+            let sourceItem = actualRelevantItems[actualIndex]
+            let itemToMove: MenuBarItem
+            let destination: MenuBarItemManager.MoveDestination
+
+            if desiredIndex < actualIndex {
+                guard actualRelevantItems.indices.contains(actualIndex - 1) else {
+                    Logger.layoutBar.info("No left step target for \(item.logString); using actual menu bar order")
                     return
                 }
-
-                let didConverge = await self.convergeLayoutOrder(
-                    appState: appState,
-                    desiredWindowIDs: desiredWindowIDs,
-                    maxCorrections: self.maxLayoutCorrections
-                )
-                if didConverge {
-                    Logger.layoutBar.info("Layout move converged despite move error: \(error)")
-                } else if self.section.name == .visible {
-                    Logger.layoutBar.info(
-                        "Visible layout move reported an event error before convergence; using actual menu bar order: \(error)"
-                    )
-                } else {
-                    Logger.layoutBar.error("Error moving menu bar item: \(error)")
-                    self.restoreOriginalPosition(of: sourceView)
+                itemToMove = sourceItem
+                destination = .leftOfItem(actualRelevantItems[actualIndex - 1])
+            } else {
+                guard actualRelevantItems.indices.contains(actualIndex + 1) else {
+                    Logger.layoutBar.info("No right step target for \(item.logString); using actual menu bar order")
+                    return
                 }
-                await self.refreshImagesAfterMove(appState: appState, expectedItems: expectedItems)
+                itemToMove = actualRelevantItems[actualIndex + 1]
+                destination = .leftOfItem(sourceItem)
+            }
+
+            Logger.layoutBar.debug(
+                "Applying hidden layout step \(step + 1) for \(itemToMove.logString) to \(destination.logString)"
+            )
+            await moveHiddenItemUsingBestAvailablePath(
+                appState: appState,
+                item: itemToMove,
+                destination: destination
+            )
+
+            let didAdvance = await cacheHiddenItemsUntilStepAdvances(
+                appState: appState,
+                itemWindowID: sourceItem.windowID,
+                desiredWindowIDs: desiredWindowIDs,
+                previousIndex: actualIndex
+            )
+            guard didAdvance else {
+                logHiddenLayoutMismatch(
+                    appState: appState,
+                    item: sourceItem,
+                    desiredWindowIDs: desiredWindowIDs,
+                    reason: "step \(step + 1) did not advance"
+                )
+                Logger.layoutBar.info(
+                    "Hidden layout step did not advance for \(sourceItem.logString); using actual menu bar order"
+                )
+                return
+            }
+
+            try? await Task.sleep(for: hiddenPhysicalStepCooldownDelay)
+        }
+
+        Logger.layoutBar.info("Stepwise layout move reached step limit for \(item.logString); using actual menu bar order")
+    }
+
+    private func hiddenLayoutMatchesDesiredOrder(
+        appState: AppState,
+        desiredWindowIDs: [CGWindowID]
+    ) -> Bool {
+        let actualWindowIDs = appState.itemManager.itemCache
+            .managedItems(for: section.name)
+            .map(\.windowID)
+        let desiredPresentWindowIDs = desiredWindowIDs.filter { actualWindowIDs.contains($0) }
+        let actualRelevantWindowIDs = actualWindowIDs.filter { desiredWindowIDs.contains($0) }
+        return !desiredPresentWindowIDs.isEmpty && desiredPresentWindowIDs == actualRelevantWindowIDs
+    }
+
+    private func logHiddenLayoutMismatch(
+        appState: AppState,
+        item: MenuBarItem,
+        desiredWindowIDs: [CGWindowID],
+        reason: String
+    ) {
+        let actualItems = appState.itemManager.itemCache.managedItems(for: section.name)
+        let actualWindowIDs = actualItems.map(\.windowID)
+        let desiredPresentWindowIDs = desiredWindowIDs.filter { actualWindowIDs.contains($0) }
+        let actualRelevantItems = actualItems.filter { desiredWindowIDs.contains($0.windowID) }
+        let actualRelevantWindowIDs = actualRelevantItems.map(\.windowID)
+        let desiredIndex = desiredPresentWindowIDs.firstIndex(of: item.windowID)
+        let actualIndex = actualRelevantWindowIDs.firstIndex(of: item.windowID)
+        let indexDelta: Int? = if let desiredIndex, let actualIndex {
+            actualIndex - desiredIndex
+        } else {
+            nil
+        }
+
+        Logger.layoutBar.debug(
+            """
+            Hidden layout mismatch (\(reason)) item=\(item.logString) desiredIndex=\(String(describing: desiredIndex)) actualIndex=\(String(describing: actualIndex)) delta=\(String(describing: indexDelta)) desired=\(logString(for: desiredPresentWindowIDs, items: actualItems)) actual=\(actualRelevantItems.map(\.logString).joined(separator: " | "))
+            """
+        )
+    }
+
+    private func logString(for windowIDs: [CGWindowID], items: [MenuBarItem]) -> String {
+        windowIDs
+            .map { windowID in
+                items.first { $0.windowID == windowID }?.logString ?? "#\(windowID)"
+            }
+            .joined(separator: " | ")
+    }
+
+    private func cacheHiddenItemsUntilDesiredOrder(
+        appState: AppState,
+        desiredWindowIDs: [CGWindowID]
+    ) async -> Bool {
+        for attempt in 0..<8 {
+            if attempt > 0 {
+                try? await Task.sleep(for: layoutConvergenceRetryDelay)
+            }
+
+            await appState.itemManager.cacheItemsRegardless()
+
+            if hiddenLayoutMatchesDesiredOrder(appState: appState, desiredWindowIDs: desiredWindowIDs) {
+                return true
             }
         }
+
+        return false
+    }
+
+    private func cacheHiddenItemsUntilStepAdvances(
+        appState: AppState,
+        itemWindowID: CGWindowID,
+        desiredWindowIDs: [CGWindowID],
+        previousIndex: Int
+    ) async -> Bool {
+        for attempt in 0..<4 {
+            if attempt > 0 {
+                try? await Task.sleep(for: layoutConvergenceRetryDelay)
+            }
+
+            await appState.itemManager.cacheItemsRegardless()
+
+            let actualItems = appState.itemManager.itemCache.managedItems(for: section.name)
+            let actualRelevantItems = actualItems.filter { desiredWindowIDs.contains($0.windowID) }
+            guard let actualIndex = actualRelevantItems.firstIndex(where: { $0.windowID == itemWindowID }) else {
+                return false
+            }
+
+            if actualIndex != previousIndex {
+                return true
+            }
+        }
+
+        return false
     }
 
     private func refreshImagesAfterMove(
@@ -539,12 +753,10 @@ final class LayoutBarPaddingView: NSView {
     ) async {
         if section.name != .visible {
             await appState.imageCache.updateCacheWithoutChecks(sections: MenuBarSection.Name.allCases)
-            try? await Task.sleep(for: .milliseconds(700))
-            await appState.itemManager.cacheItemsRegardless()
         } else {
             await waitForVisibleLayoutToSettle(appState: appState, expectedItems: expectedItems)
+            await appState.imageCache.updateCacheWithoutChecks(sections: MenuBarSection.Name.allCases)
         }
-        await appState.imageCache.updateCacheWithoutChecks(sections: MenuBarSection.Name.allCases)
     }
 
     private func waitForVisibleLayoutToSettle(
@@ -574,115 +786,5 @@ final class LayoutBarPaddingView: NSView {
         }
 
         Logger.layoutBar.debug("Visible layout settle wait timed out; refreshing images with latest cache")
-    }
-
-    private func convergeLayoutOrder(
-        appState: AppState,
-        desiredWindowIDs: [CGWindowID],
-        maxCorrections: Int
-    ) async -> Bool {
-        try? await Task.sleep(for: initialLayoutConvergenceDelay)
-        await appState.itemManager.cacheItemsRegardless()
-
-        for attempt in 0...maxCorrections {
-            let actualItems = appState.itemManager.itemCache.managedItems(for: section.name)
-            let actualWindowIDs = actualItems.map(\.windowID)
-            let desiredPresentWindowIDs = desiredWindowIDs.filter { actualWindowIDs.contains($0) }
-            let actualRelevantWindowIDs = actualWindowIDs.filter { desiredWindowIDs.contains($0) }
-
-            guard desiredPresentWindowIDs.count == desiredWindowIDs.count else {
-                guard attempt < maxCorrections else {
-                    Logger.layoutBar.warning("Some desired items are missing after layout move in \(section.name.logString)")
-                    return false
-                }
-                try? await Task.sleep(for: layoutConvergenceRetryDelay)
-                await appState.itemManager.cacheItemsRegardless()
-                continue
-            }
-
-            if desiredPresentWindowIDs == actualRelevantWindowIDs {
-                Logger.layoutBar.debug("Layout order converged for \(section.name.logString)")
-                return true
-            }
-
-            guard attempt < maxCorrections else {
-                Logger.layoutBar.warning("Layout order did not converge for \(section.name.logString)")
-                return false
-            }
-
-            guard let correction = correctionMove(
-                actualItems: actualItems,
-                desiredWindowIDs: desiredPresentWindowIDs,
-                actualWindowIDs: actualRelevantWindowIDs
-            ) else {
-                Logger.layoutBar.warning("No correction move available for \(section.name.logString)")
-                return false
-            }
-
-            Logger.layoutBar.debug(
-                "Applying layout correction \(attempt + 1) for \(correction.item.logString) to \(correction.destination.logString)"
-            )
-
-            do {
-                try await appState.itemManager.move(
-                    item: correction.item,
-                    to: correction.destination,
-                    maxAttempts: 1,
-                    wakeUpOnFailure: false
-                )
-            } catch {
-                Logger.layoutBar.debug("Layout correction reported an event error: \(error)")
-            }
-
-            try? await Task.sleep(for: layoutConvergenceRetryDelay)
-            await appState.itemManager.cacheItemsRegardless()
-        }
-
-        return false
-    }
-
-    private func correctionMove(
-        actualItems: [MenuBarItem],
-        desiredWindowIDs: [CGWindowID],
-        actualWindowIDs: [CGWindowID]
-    ) -> (item: MenuBarItem, destination: MenuBarItemManager.MoveDestination)? {
-        let mismatchIndices = desiredWindowIDs.indices.filter { index in
-            actualWindowIDs.indices.contains(index) &&
-            actualWindowIDs[index] != desiredWindowIDs[index]
-        }
-
-        for mismatchIndex in mismatchIndices {
-            let itemWindowID = desiredWindowIDs[mismatchIndex]
-            guard
-                let item = actualItems.first(where: { $0.windowID == itemWindowID }),
-                isUsableCorrectionSource(item)
-            else {
-                continue
-            }
-
-            if
-                desiredWindowIDs.indices.contains(mismatchIndex + 1),
-                let targetItem = actualItems.first(where: {
-                    $0.windowID == desiredWindowIDs[mismatchIndex + 1] &&
-                    isUsableCorrectionTarget($0)
-                }),
-                targetItem.windowID != item.windowID
-            {
-                return (item, .leftOfItem(targetItem))
-            }
-
-            if
-                desiredWindowIDs.indices.contains(mismatchIndex - 1),
-                let targetItem = actualItems.first(where: {
-                    $0.windowID == desiredWindowIDs[mismatchIndex - 1] &&
-                    isUsableCorrectionTarget($0)
-                }),
-                targetItem.windowID != item.windowID
-            {
-                return (item, .rightOfItem(targetItem))
-            }
-        }
-
-        return nil
     }
 }
